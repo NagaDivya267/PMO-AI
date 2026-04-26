@@ -1,3 +1,5 @@
+from typing import Any
+
 import streamlit as st
 import pandas as pd
 from langchain_openai import ChatOpenAI
@@ -5,6 +7,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_experimental.agents import create_pandas_dataframe_agent
+from typing import Any
 # Page config
 st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
 
@@ -132,12 +135,15 @@ elif persona == "CIO":
         "Strategic Delays",
         strategic_delays
     )   
-pmo_agent = create_pandas_dataframe_agent(
-    load_llm(),
-    [initiative_df, feature_df, epic_df, cost_df, risk_df],
-    verbose=True,
-    allow_dangerous_code=True
-)
+@st.cache_resource
+def load_pmo_agent():
+    return create_pandas_dataframe_agent(
+        load_llm(),
+        [initiative_df, feature_df, epic_df, cost_df, risk_df],
+        verbose=True,
+        allow_dangerous_code=True
+    )
+pmo_agent = load_pmo_agent()
 # Sidebar with data overview
 with st.sidebar:
     st.header("📊 Project Data Overview")
@@ -198,6 +204,17 @@ if question:
 
         with st.spinner("🤔 Analyzing project data..."):
 
+            try:
+                data_response = pmo_agent.invoke(
+                    {"input": str(question)}
+                )
+
+                structured_output = data_response["output"]
+
+            except Exception:
+                structured_output = "Unable to analyze structured PMO data for this query."
+                data_response = {"output": structured_output}
+
             rag_docs = retriever.invoke(str(question))
 
             rag_context = "\n".join(
@@ -210,40 +227,56 @@ You are an intelligent PMO AI Assistant.
 
 Selected Persona: {persona}
 
+Response Rules:
+
+Director:
+- Keep concise
+- Highlight decisions
+- Focus on portfolio impact
+- show only top 3 priorities
+- Prioritize strategic insights
+
+Project Manager:
+- Show blockers
+- Show execution risks
+- Provide mitigation actions
+- Show blockers
+
+CIO:
+- Focus on strategic impact
+- Budget exposure
+- Governance risks
+
 Chat History:
 {st.session_state.chat_history}
 
 RACI Context:
 {rag_context}
 
-Project Data:
-{context}
+Structured Data Insights:
+{structured_output}
 
 User Question:
 {question}
 
-Provide:
-1. Root cause
-2. Business impact
-3. Recommended action
+Answer using actual project data.
 """
             )
+        
+         # MOVE THESE HERE
+        with st.chat_message("user"):
+            st.write(question)
 
-            with st.chat_message("user"):
-                st.write(question)
+        with st.chat_message("assistant"):
+            st.write(response.content)
 
-            with st.chat_message("assistant"):
-                st.write(response.content)
+        st.session_state.chat_history.append({
+            "user": question,
+            "assistant": response.content
+        })
 
-            st.session_state.chat_history.append({
-                "user": question,
-                "assistant": response.content
-            })
-
-            with st.expander("📊 Data Sources"):
-                st.text(context[:2000] + "..." if len(context) > 2000 else context)
-
+        with st.expander("📊 Data Analysis Used"):
+            st.write(structured_output)
 # Footer
 st.markdown("---")
-st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
 st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
