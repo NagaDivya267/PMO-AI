@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 from langchain_openai import ChatOpenAI
-
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 
 # Page config
 st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
@@ -14,10 +16,38 @@ def load_data():
     epic_df = pd.read_csv("Epic.csv")
     cost_df = pd.read_csv("Revised_Raw_Cost_Data.csv")
     risk_df = pd.read_csv("Revised_Raw_Risk_Data.csv")
-    return initiative_df, feature_df, epic_df, cost_df, risk_df
+    loader = PyPDFLoader("raci.pdf")
+    docs = loader.load()
+    return initiative_df, feature_df, epic_df, cost_df, risk_df,docs
+initiative_df, feature_df, epic_df, cost_df, risk_df, docs = load_data()
+@st.cache_resource
+def load_vector_store(docs):
+    embeddings = OpenAIEmbeddings(
+        api_key=st.secrets["OPENAI_API_KEY"]
+    )
 
-initiative_df, feature_df, epic_df, cost_df, risk_df = load_data()
+    vectorstore = FAISS.from_documents(
+        docs,
+        embeddings
+    )
+    return vectorstore.as_retriever()
+retriever = load_vector_store(docs)
 
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        api_key=st.secrets["OPENAI_API_KEY"],
+        temperature=0.7
+    )
+
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        api_key=st.secrets["OPENAI_API_KEY"],
+        temperature=0.7
+    )
 # Step 6: Convert datasets into summary context
 def create_context(initiative_df, cost_df, risk_df, feature_df, epic_df):
     """Create a summary context from all datasets"""
@@ -26,10 +56,10 @@ def create_context(initiative_df, cost_df, risk_df, feature_df, epic_df):
     initiative_summary = initiative_df[['Issue key', 'Summary', 'Status', 'Priority']].head(10).to_string()
     
     # Cost summary
-    cost_summary = cost_df.to_string()
+    cost_summary = cost_df.head(20).to_string()
     
     # Risk summary
-    risk_summary = risk_df.to_string()
+    risk_summary = risk_df.head(20).to_string()
     
     # Feature count per initiative
     feature_counts = feature_df['Parent key'].value_counts().to_string()
@@ -96,6 +126,10 @@ with col4:
     if st.button("Summarize project health"):
         st.session_state.question = "Summarize overall project health"
 
+# Initialize chat memory
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # Chat input
 question = st.chat_input("Ask about project health, risks, costs, or delivery...")
 
@@ -122,35 +156,49 @@ if question:
         st.write(question)
     else:
         # Initialize LangChain LLM
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            api_key=api_key,
-            temperature=0.7
-        )
+        llm = load_llm()
 
         with st.spinner("🤔 Analyzing project data..."):
+            rag_docs = retriever.get_relevant_documents(question)
+            rag_context = "\n".join(
+                [doc.page_content for doc in rag_docs]
+            )
+            
             response = llm.invoke(
                 f"""
-You are a PMO AI assistant helping leaders understand risks, delays and cost overruns.
+You are a PMO AI assistant helping leaders understand risks, delays, costs, and stakeholder communication.
 
-Provide concise actionable insights based on project data.
+Use previous chat history to maintain conversation continuity.
 
-Focus on:
-- Key risks
-- Budget overruns
-- Delivery delays
-- Leadership recommendations
+Chat History:
+{st.session_state.chat_history}
+
+Use RACI context to determine how to communicate with different personas.
+
+RACI Context:
+{rag_context}
 
 Project Data:
 {context}
 
 User Question:
 {question}
+
+Provide:
+1. Root cause
+2. Business impact
+3. Recommended action
+4. Tailor tone based on persona
 """
             )
-
             st.subheader("💬 AI Response")
             st.write(response.content)
+
+            # Store conversation history
+            st.session_state.chat_history.append({
+                "user": question,
+                "assistant": response.content
+            })
 
             with st.expander("📊 Data Sources"):
                 st.text(context[:2000] + "..." if len(context) > 2000 else context)
