@@ -161,7 +161,6 @@ Use previous chat history to maintain conversation continuity.
 Chat History:
 {st.session_state.chat_history}
 
-Selected Persona:
 {persona}
 
 RACI Context:
@@ -188,6 +187,7 @@ Provide:
                 st.write(response.content)
 
             st.session_state.chat_history.append({
+                f"""
                 "user": question,
                 "assistant": response.content
             })
