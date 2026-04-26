@@ -1,5 +1,4 @@
-from typing import Any
-
+import os
 import streamlit as st
 import pandas as pd
 from langchain_openai import ChatOpenAI
@@ -7,30 +6,68 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_experimental.agents import create_pandas_dataframe_agent
-from typing import Any
+
 # Page config
 st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
 
-# Step 1-5: Load datasets
 @st.cache_data
 def load_data():
-    initiative_df = pd.read_csv("Initiative Jira Data.csv")
-    feature_df = pd.read_csv("Feature-Initiative Jira.csv")
-    epic_df = pd.read_csv("Epic.csv")
-    cost_df = pd.read_csv("Revised_Raw_Cost_Data.csv")
-    risk_df = pd.read_csv("Revised_Raw_Risk_Data.csv")
+    dataframes = {}
+
+    for file in os.listdir("."):
+        if file.endswith(".csv"):
+            df_name = file.replace(".csv", "").replace(" ", "_").lower()
+            dataframes[df_name] = pd.read_csv(file)
+
     loader = PyPDFLoader("RACI.pdf")
     docs = loader.load()
-    return initiative_df, feature_df, epic_df, cost_df, risk_df,docs
-initiative_df, feature_df, epic_df, cost_df, risk_df, docs = load_data()
-all_data = {
-    "initiatives": initiative_df,
-    "features": feature_df,
-    "epics": epic_df,
-    "costs": cost_df,
-    "risks": risk_df
-}
 
+    return dataframes, docs
+
+
+dataframes, docs = load_data()
+
+def get_schema_info(dataframes):
+    schema_info = {}
+
+    for name, df in dataframes.items():
+        schema_info[name] = {
+            "columns": list(df.columns),
+            "rows": len(df)
+        }
+
+    return schema_info
+
+
+schema_info = get_schema_info(dataframes)
+
+
+def detect_relationships(dataframes):
+    relationships = []
+
+    names = list(dataframes.keys())
+
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            df1 = dataframes[names[i]]
+            df2 = dataframes[names[j]]
+
+            common_cols = list(
+                set(df1.columns).intersection(set(df2.columns))
+            )
+
+            if common_cols:
+                relationships.append(
+                    f"{names[i]} ↔ {names[j]} via {common_cols}"
+                )
+
+    if not relationships:
+        relationships.append(
+        "No direct relationships detected. Use column similarity and business context."
+    )
+    return relationships
+
+relationships = detect_relationships(dataframes)
 @st.cache_resource
 def load_vector_store(docs):
     embeddings = OpenAIEmbeddings(
@@ -41,8 +78,12 @@ def load_vector_store(docs):
         docs,
         embeddings
     )
+
     return vectorstore.as_retriever()
+
+
 retriever = load_vector_store(docs)
+
 
 @st.cache_resource
 def load_llm():
@@ -65,65 +106,67 @@ if persona == "Director":
 
     # On track initiatives
     on_track_count = len(
-        initiative_df[
-            initiative_df["Status"].isin(["On Track", "Completed"])
+        dataframes["initiative_jira_data"][
+            dataframes["initiative_jira_data"]["Status"].isin(["On Track", "Completed"])
         ]
     )
 
     # Budget variance
     budget_variance = (
-        cost_df["Actual_Cost_USD"].sum() -
-        cost_df["Planned_Budget_USD"].sum()
+        dataframes["revised_raw_cost_data"]["Actual_Cost_USD"].sum() -
+        dataframes["revised_raw_cost_data"]["Planned_Budget_USD"].sum()
     )
 
     # Critical risks
     critical_risks = len(
-        risk_df[
-            (risk_df["Impact"].isin(["High", "Critical"])) &
-            (risk_df["Status"] != "Closed")
+        dataframes["revised_raw_risk_data"][
+            dataframes["revised_raw_risk_data"]["Impact"].isin(["High", "Critical"]) &
+            dataframes["revised_raw_risk_data"]["Status"] != "Closed"
         ]
     )
 
-    col1.metric("Total Initiatives", len(initiative_df))
+    col1.metric("Total Initiatives", len(dataframes["initiative_jira_data"]))
     col2.metric("On Track", on_track_count)
     col3.metric("Budget Variance", f"${budget_variance:,.0f}")
     col4.metric("Critical Risks", critical_risks)
 elif persona == "Project Manager":
-    
+
     col1, col2, col3 = st.columns(3)
 
     open_epics = len(
-        epic_df[
-            epic_df["Status"] != "Done"
+        dataframes["epic"][
+            dataframes["epic"]["Status"] != "Done"
         ]
     )
 
     open_risks = len(
-        risk_df[
-            risk_df["Status"] != "Closed"
+        dataframes["revised_raw_risk_data"][
+            dataframes["revised_raw_risk_data"]["Status"] != "Closed"
         ]
     )
 
     blocked_features = len(
-        feature_df[
-            feature_df["Status"] == "Blocked"
+        dataframes["feature-initiative_jira"][
+            dataframes["feature-initiative_jira"]["Status"] == "Blocked"
         ]
     )
 
     col1.metric("Open Epics", open_epics)
     col2.metric("Open Risks", open_risks)
     col3.metric("Blocked Features", blocked_features)
+    
 elif persona == "CIO":
+
     col1, col2 = st.columns(2)
 
-    investment_at_risk = cost_df[
-        cost_df["Actual_Cost_USD"] >
-        cost_df["Planned_Budget_USD"]
+    investment_at_risk = dataframes["revised_raw_cost_data"][
+        dataframes["revised_raw_cost_data"]["Actual_Cost_USD"] >
+        dataframes["revised_raw_cost_data"]["Planned_Budget_USD"]
     ]["Actual_Cost_USD"].sum()
 
     strategic_delays = len(
-        initiative_df[
-            initiative_df["Status"] == "Delayed"
+        dataframes["initiative_jira_data"][
+            dataframes["initiative_jira_data"]["Status"] == "Delayed"
         ]
     )
 
@@ -131,59 +174,71 @@ elif persona == "CIO":
         "Investment at Risk",
         f"${investment_at_risk:,.0f}"
     )
+
     col2.metric(
         "Strategic Delays",
         strategic_delays
-    )   
+    )
 @st.cache_resource
 def load_pmo_agent():
+    combined_df = pd.concat(
+        [
+            df.assign(source_table=name)
+            for name, df in dataframes.items()
+        ],
+        ignore_index=True,
+        sort=False
+    )
+
     return create_pandas_dataframe_agent(
         load_llm(),
-        [initiative_df, feature_df, epic_df, cost_df, risk_df],
+        combined_df,
         verbose=True,
         allow_dangerous_code=True
     )
 pmo_agent = load_pmo_agent()
 # Sidebar with data overview
 with st.sidebar:
-    st.header("📊 Project Data Overview")
-    st.metric("Initiatives", len(initiative_df))
-    st.metric("Features", len(feature_df))
-    st.metric("Epics", len(epic_df))
-    st.metric("Risks", len(risk_df))
-    
+    st.sidebar.write("Loaded Tables:")
+    st.sidebar.write(list(dataframes.keys()))
+    st.metric("Initiatives", len(dataframes["initiative_jira_data"]))
+    st.metric("Features", len(dataframes["feature-initiative_jira"]))
+    st.metric("Epics", len(dataframes["epic"]))
+    st.metric("Risks", len(dataframes["revised_raw_risk_data"]))
     st.subheader("💰 Cost Summary")
-    total_budget = cost_df['Planned_Budget_USD'].sum()
-    total_actual = cost_df['Actual_Cost_USD'].sum()
+    total_budget = dataframes["revised_raw_cost_data"]['Planned_Budget_USD'].sum()
+    total_actual = dataframes["revised_raw_cost_data"]['Actual_Cost_USD'].sum()
     st.metric("Total Budget", f"${total_budget:,.0f}")
     st.metric("Total Actual", f"${total_actual:,.0f}")
     st.metric("Variance", f"${total_budget - total_actual:,.0f}")
     
     st.subheader("⚠️ Risk Summary")
-    risk_status = risk_df['Status'].value_counts()
+    risk_status = dataframes["revised_raw_risk_data"]['Status'].value_counts()
     for status, count in risk_status.items():
         st.write(f"- {status}: {count}")
 
 # Example questions
 st.subheader("💡 Example Questions")
-col1, col2, col3, col4 = st.columns(4)
+
+col1, col2, col3, col4 = st.columns(4) 
+
 with col1:
     if st.button("Why is Hypercare high risk?"):
         st.session_state.question = "Why is Hypercare high risk?"
+
 with col2:
     if st.button("Which initiatives are over budget?"):
         st.session_state.question = "Which initiatives are over budget?"
+
 with col3:
     if st.button("What should leadership focus on today?"):
         st.session_state.question = "What should leadership focus on today?"
+
 with col4:
     if st.button("Summarize project health"):
         st.session_state.question = "Summarize overall project health"
-
-# Initialize chat memory
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
 # Chat input
 question = st.chat_input("Ask about project health, risks, costs, or delivery...")
 
@@ -211,8 +266,8 @@ if question:
 
                 structured_output = data_response["output"]
 
-            except Exception:
-                structured_output = "Unable to analyze structured PMO data for this query."
+            except Exception as e:
+                structured_output = f"Agent Error: {str(e)}"
                 data_response = {"output": structured_output}
 
             rag_docs = retriever.invoke(str(question))
@@ -233,14 +288,12 @@ Director:
 - Keep concise
 - Highlight decisions
 - Focus on portfolio impact
-- show only top 3 priorities
-- Prioritize strategic insights
+- Show only top 3 priorities
 
 Project Manager:
 - Show blockers
 - Show execution risks
 - Provide mitigation actions
-- Show blockers
 
 CIO:
 - Focus on strategic impact
@@ -256,14 +309,25 @@ RACI Context:
 Structured Data Insights:
 {structured_output}
 
+Available Tables:
+{list(dataframes.keys())}
+
+Schema Information:
+{schema_info}
+
+Detected Relationships:
+{relationships}
+
+Use relationships between datasets dynamically.
+Join tables when common columns exist.
+
 User Question:
 {question}
 
 Answer using actual project data.
 """
             )
-        
-         # MOVE THESE HERE
+
         with st.chat_message("user"):
             st.write(question)
 
@@ -276,7 +340,8 @@ Answer using actual project data.
         })
 
         with st.expander("📊 Data Analysis Used"):
-            st.write(structured_output)
+             st.write(structured_output)
+
 # Footer
 st.markdown("---")
 st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
