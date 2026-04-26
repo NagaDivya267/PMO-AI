@@ -187,7 +187,7 @@ Provide:
                 st.write(response.content)
 
             st.session_state.chat_history.append({
-                f"""
+            st.session_state.chat_history.append({
                 "user": question,
                 "assistant": response.content
             })
