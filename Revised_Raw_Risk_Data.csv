@@ -1,0 +1,11 @@
+Risk_ID,Linked_Level,Linked_ID,Linked_Name,Risk_Description,Probability,Impact,Mitigation_Owner,Mitigation_Plan,Status,Created_Date
+RISK-2000,Epic,AMSA-110,SD - Functional Specification,Third-party API delay,Low,Medium,Product Owner,Review scope,Closed,10-04-2026
+RISK-2001,Feature,AMSA-19,"SD Business Blueprint Preparation, Review & Sign-Off",Testing bottleneck,High,Low,Engineering Manager,Add backup resources,Mitigating,11-04-2026
+RISK-2002,Epic,AMSA-114,Trade Price and Approval Form Request and Contract Authorization Control Sheet (,Scope change request,High,Critical,Product Owner,Add backup resources,Open,18-04-2026
+RISK-2003,Initiative,AMSA-6,Hypercare,Third-party API delay,Low,Low,PMO Lead,Review scope,Closed,08-04-2026
+RISK-2004,Epic,AMSA-113,CTRM - Functional Specification,Scope change request,Medium,High,Product Owner,Review scope,Mitigating,12-04-2026
+RISK-2005,Epic,AMSA-121,Execution of  Transaction ZMNG. FRS ID- SD-0016,Vendor dependency delay,Medium,High,Engineering Manager,Escalate dependency,Closed,01-03-2026
+RISK-2006,Epic,AMSA-113,CTRM - Functional Specification,Vendor dependency delay,High,Critical,Product Owner,Escalate dependency,Mitigating,26-03-2026
+RISK-2007,Feature,AMSA-71,Create user Manual Doc for all Modules,Security compliance issue,High,Critical,PMO Lead,Escalate dependency,Closed,23-03-2026
+RISK-2008,Epic,AMSA-424,SD,Environment instability,Medium,High,Product Owner,Add backup resources,Closed,17-04-2026
+RISK-2009,Feature,AMSA-86,Exit UAT & UAT Signoff,Environment instability,High,High,PMO Lead,Increase testing bandwidth,Mitigating,07-03-2026

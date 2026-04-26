@@ -1,0 +1,7 @@
+Initiative_ID,Initiative_Name,Planned_Budget_USD,Actual_Cost_USD,Resource_Cost_USD,Vendor_Cost_USD,Planned_Completion_Percentage
+AMSA-6,Hypercare,1190037,1066597,745537,321060,73
+AMSA-5,Deploy,795299,540842,375728,165114,70
+AMSA-4,Realize test,914143,719516,478304,241212,67
+AMSA-3,Realize Build,615418,521312,368759,152553,50
+AMSA-2,Explore,527840,344815,237043,107772,60
+AMSA-1,Prepare program start,549682,516938,375785,141153,76
