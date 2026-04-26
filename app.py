@@ -184,9 +184,9 @@ Provide:
                 st.write(question)
 
             with st.chat_message("assistant"):
+
                 st.write(response.content)
 
-            st.session_state.chat_history.append({
             st.session_state.chat_history.append({
                 "user": question,
                 "assistant": response.content
