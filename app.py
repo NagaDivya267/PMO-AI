@@ -81,6 +81,11 @@ context = create_context(initiative_df, cost_df, risk_df, feature_df, epic_df)
 st.title("🤖 PMO AI Assistant")
 st.markdown("**Ask questions about project health, risks, costs, and delivery**")
 
+persona = st.selectbox(
+    "Select Stakeholder Persona",
+    ["Director", "Project Manager", "CIO", "Engineering Manager"]
+)
+
 # Sidebar with data overview
 with st.sidebar:
     st.header("📊 Project Data Overview")
@@ -120,9 +125,7 @@ with col4:
 # Initialize chat memory
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-# Initialize chat memory
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+
 # Chat input
 question = st.chat_input("Ask about project health, risks, costs, or delivery...")
 
@@ -158,7 +161,8 @@ Use previous chat history to maintain conversation continuity.
 Chat History:
 {st.session_state.chat_history}
 
-Use RACI context to determine how to communicate with different personas.
+Selected Persona:
+{persona}
 
 RACI Context:
 {rag_context}
@@ -177,8 +181,11 @@ Provide:
 """
             )
 
-            st.subheader("💬 AI Response")
-            st.write(response.content)
+            with st.chat_message("user"):
+                st.write(question)
+
+            with st.chat_message("assistant"):
+                st.write(response.content)
 
             st.session_state.chat_history.append({
                 "user": question,
@@ -186,6 +193,8 @@ Provide:
             })
 
             with st.expander("📊 Data Sources"):
-                st.text(context[:2000] + "..." if len(context) > 2000 else context)# Footer
+                st.text(context[:2000] + "..." if len(context) > 2000 else context)
+
+# Footer
 st.markdown("---")
 st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
