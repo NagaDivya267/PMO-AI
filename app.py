@@ -16,7 +16,7 @@ def load_data():
     epic_df = pd.read_csv("Epic.csv")
     cost_df = pd.read_csv("Revised_Raw_Cost_Data.csv")
     risk_df = pd.read_csv("Revised_Raw_Risk_Data.csv")
-    loader = PyPDFLoader("raci.pdf")
+    loader = PyPDFLoader("RACI.pdf")
     docs = loader.load()
     return initiative_df, feature_df, epic_df, cost_df, risk_df,docs
 initiative_df, feature_df, epic_df, cost_df, risk_df, docs = load_data()
@@ -36,15 +36,6 @@ retriever = load_vector_store(docs)
 @st.cache_resource
 def load_llm():
     return ChatOpenAI(
-        model="gpt-4o-mini",
-        api_key=st.secrets["OPENAI_API_KEY"],
-        temperature=0.7
-    )
-
-@st.cache_resource
-def load_llm():
-    return ChatOpenAI(
-        model="gpt-4o-mini",
         api_key=st.secrets["OPENAI_API_KEY"],
         temperature=0.7
     )
@@ -129,7 +120,9 @@ with col4:
 # Initialize chat memory
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
+# Initialize chat memory
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 # Chat input
 question = st.chat_input("Ask about project health, risks, costs, or delivery...")
 
@@ -139,31 +132,23 @@ if "question" in st.session_state and st.session_state.question:
     st.session_state.question = None
 
 if question:
-    # Step 7: OpenAI integration
-    
-    # Note: Replace with your actual API key or use st.secrets
     api_key = st.secrets.get("OPENAI_API_KEY", None)
-    
+
     if not api_key:
-        st.warning("⚠️ OpenAI API key not configured. Please set OPENAI_API_KEY in secrets.toml or environment variables.")
-        st.info("Add to your `.streamlit/secrets.toml`:")
-        st.code("OPENAI_API_KEY = 'your-api-key-here'", lang="toml")
-        
-        # Show context for debugging
-        st.subheader("📋 Project Data Context")
-        st.text_area("Context sent to AI", context, height=300)
-        st.subheader("❓ Your Question")
-        st.write(question)
+        st.warning("⚠️ OpenAI API key not configured.")
+        st.info("Add OPENAI_API_KEY in secrets.toml")
+
     else:
-        # Initialize LangChain LLM
         llm = load_llm()
 
         with st.spinner("🤔 Analyzing project data..."):
-            rag_docs = retriever.get_relevant_documents(question)
+
+            rag_docs = retriever.invoke(str(question))
+
             rag_context = "\n".join(
                 [doc.page_content for doc in rag_docs]
             )
-            
+
             response = llm.invoke(
                 f"""
 You are a PMO AI assistant helping leaders understand risks, delays, costs, and stakeholder communication.
@@ -191,18 +176,16 @@ Provide:
 4. Tailor tone based on persona
 """
             )
+
             st.subheader("💬 AI Response")
             st.write(response.content)
 
-            # Store conversation history
             st.session_state.chat_history.append({
                 "user": question,
                 "assistant": response.content
             })
 
             with st.expander("📊 Data Sources"):
-                st.text(context[:2000] + "..." if len(context) > 2000 else context)
-
-# Footer
+                st.text(context[:2000] + "..." if len(context) > 2000 else context)# Footer
 st.markdown("---")
 st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
