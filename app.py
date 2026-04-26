@@ -83,9 +83,84 @@ st.markdown("**Ask questions about project health, risks, costs, and delivery**"
 
 persona = st.selectbox(
     "Select Stakeholder Persona",
-    ["Director", "Project Manager", "CIO", "Engineering Manager"]
+    ["Director", "Project Manager", "CIO"]
 )
+if persona == "Director":
+    
+    col1, col2, col3, col4 = st.columns(4)
 
+    # On track initiatives
+    on_track_count = len(
+        initiative_df[
+            initiative_df["Status"].isin(["On Track", "Completed"])
+        ]
+    )
+
+    # Budget variance
+    budget_variance = (
+        cost_df["Actual_Cost_USD"].sum() -
+        cost_df["Planned_Budget_USD"].sum()
+    )
+
+    # Critical risks
+    critical_risks = len(
+        risk_df[
+            (risk_df["Impact"].isin(["High", "Critical"])) &
+            (risk_df["Status"] != "Closed")
+        ]
+    )
+
+    col1.metric("Total Initiatives", len(initiative_df))
+    col2.metric("On Track", on_track_count)
+    col3.metric("Budget Variance", f"${budget_variance:,.0f}")
+    col4.metric("Critical Risks", critical_risks)
+elif persona == "Project Manager":
+    
+    col1, col2, col3 = st.columns(3)
+
+    open_epics = len(
+        epic_df[
+            epic_df["Status"] != "Done"
+        ]
+    )
+
+    open_risks = len(
+        risk_df[
+            risk_df["Status"] != "Closed"
+        ]
+    )
+
+    blocked_features = len(
+        feature_df[
+            feature_df["Status"] == "Blocked"
+        ]
+    )
+
+    col1.metric("Open Epics", open_epics)
+    col2.metric("Open Risks", open_risks)
+    col3.metric("Blocked Features", blocked_features)
+elif persona == "CIO":
+    col1, col2, col3 = st.columns(3)
+
+    investment_at_risk = cost_df[
+        cost_df["Actual_Cost_USD"] >
+        cost_df["Planned_Budget_USD"]
+    ]["Actual_Cost_USD"].sum()
+
+    strategic_delays = len(
+        initiative_df[
+            initiative_df["Status"] == "Delayed"
+        ]
+    )
+
+    col1.metric(
+        "Investment at Risk",
+        f"${investment_at_risk:,.0f}"
+    )
+    col2.metric(
+        "Strategic Delays",
+        strategic_delays
+    )
 # Sidebar with data overview
 with st.sidebar:
     st.header("📊 Project Data Overview")
@@ -154,14 +229,33 @@ if question:
 
             response = llm.invoke(
                 f"""
-You are a PMO AI assistant helping leaders understand risks, delays, costs, and stakeholder communication.
+You are an intelligent PMO AI Assistant.
 
-Use previous chat history to maintain conversation continuity.
+The response format MUST change based on selected persona.
 
-Chat History:
+Selected Persona: {persona}
+
+Rules:
+
+If persona is Director:
+- Keep response under 5 bullet points
+- Focus on executive summary
+- Highlight decisions needed
+- Avoid technical details
+
+If persona is Project Manager:
+- Provide detailed root cause analysis
+- Include blockers
+- Include delivery risks
+- Include mitigation steps
+
+If persona is CIO:
+- Focus on enterprise risk
+- Budget impact
+- Strategic decisions
+- Governance concerns
+Use previous chat history:
 {st.session_state.chat_history}
-
-{persona}
 
 RACI Context:
 {rag_context}
@@ -171,14 +265,8 @@ Project Data:
 
 User Question:
 {question}
-
-Provide:
-1. Root cause
-2. Business impact
-3. Recommended action
-4. Tailor tone based on persona
 """
-            )
+)
 
             with st.chat_message("user"):
                 st.write(question)
