@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-
+from langchain_experimental.agents import create_pandas_dataframe_agent
 # Page config
 st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
 
@@ -20,6 +20,14 @@ def load_data():
     docs = loader.load()
     return initiative_df, feature_df, epic_df, cost_df, risk_df,docs
 initiative_df, feature_df, epic_df, cost_df, risk_df, docs = load_data()
+all_data = {
+    "initiatives": initiative_df,
+    "features": feature_df,
+    "epics": epic_df,
+    "costs": cost_df,
+    "risks": risk_df
+}
+
 @st.cache_resource
 def load_vector_store(docs):
     embeddings = OpenAIEmbeddings(
@@ -39,43 +47,6 @@ def load_llm():
         api_key=st.secrets["OPENAI_API_KEY"],
         temperature=0.7
     )
-# Step 6: Convert datasets into summary context
-def create_context(initiative_df, cost_df, risk_df, feature_df, epic_df):
-    """Create a summary context from all datasets"""
-    
-    # Initiative summary
-    initiative_summary = initiative_df[['Issue key', 'Summary', 'Status', 'Priority']].head(10).to_string()
-    
-    # Cost summary
-    cost_summary = cost_df.head(20).to_string()
-    
-    # Risk summary
-    risk_summary = risk_df.head(20).to_string()
-    
-    # Feature count per initiative
-    feature_counts = feature_df['Parent key'].value_counts().to_string()
-    
-    # Epic summary
-    epic_summary = epic_df[['Issue key', 'Summary', 'Status']].head(10).to_string()
-    
-    context = f"""=== INITIATIVES ===
-{initiative_summary}
-
-=== COSTS (Budget vs Actual) ===
-{cost_summary}
-
-=== RISKS ===
-{risk_summary}
-
-=== FEATURES PER INITIATIVE ===
-{feature_counts}
-
-=== EPICS ===
-{epic_summary}"""
-    
-    return context
-
-context = create_context(initiative_df, cost_df, risk_df, feature_df, epic_df)
 
 # UI Header
 st.title("🤖 PMO AI Assistant")
@@ -140,7 +111,7 @@ elif persona == "Project Manager":
     col2.metric("Open Risks", open_risks)
     col3.metric("Blocked Features", blocked_features)
 elif persona == "CIO":
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     investment_at_risk = cost_df[
         cost_df["Actual_Cost_USD"] >
@@ -160,7 +131,13 @@ elif persona == "CIO":
     col2.metric(
         "Strategic Delays",
         strategic_delays
-    )
+    )   
+pmo_agent = create_pandas_dataframe_agent(
+    load_llm(),
+    [initiative_df, feature_df, epic_df, cost_df, risk_df],
+    verbose=True,
+    allow_dangerous_code=True
+)
 # Sidebar with data overview
 with st.sidebar:
     st.header("📊 Project Data Overview")
@@ -231,30 +208,9 @@ if question:
                 f"""
 You are an intelligent PMO AI Assistant.
 
-The response format MUST change based on selected persona.
-
 Selected Persona: {persona}
 
-Rules:
-
-If persona is Director:
-- Keep response under 5 bullet points
-- Focus on executive summary
-- Highlight decisions needed
-- Avoid technical details
-
-If persona is Project Manager:
-- Provide detailed root cause analysis
-- Include blockers
-- Include delivery risks
-- Include mitigation steps
-
-If persona is CIO:
-- Focus on enterprise risk
-- Budget impact
-- Strategic decisions
-- Governance concerns
-Use previous chat history:
+Chat History:
 {st.session_state.chat_history}
 
 RACI Context:
@@ -265,14 +221,18 @@ Project Data:
 
 User Question:
 {question}
+
+Provide:
+1. Root cause
+2. Business impact
+3. Recommended action
 """
-)
+            )
 
             with st.chat_message("user"):
                 st.write(question)
 
             with st.chat_message("assistant"):
-
                 st.write(response.content)
 
             st.session_state.chat_history.append({
@@ -285,4 +245,5 @@ User Question:
 
 # Footer
 st.markdown("---")
+st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
 st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
