@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from openai import OpenAI
+from langchain_openai import ChatOpenAI
+
 
 # Page config
 st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
@@ -105,6 +106,7 @@ if "question" in st.session_state and st.session_state.question:
 
 if question:
     # Step 7: OpenAI integration
+    
     # Note: Replace with your actual API key or use st.secrets
     api_key = st.secrets.get("OPENAI_API_KEY", None)
     
@@ -119,39 +121,37 @@ if question:
         st.subheader("❓ Your Question")
         st.write(question)
     else:
-        client = OpenAI(api_key=api_key)
-        
+        # Initialize LangChain LLM
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            api_key=api_key,
+            temperature=0.7
+        )
+
         with st.spinner("🤔 Analyzing project data..."):
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a PMO AI assistant helping leaders understand risks, delays and cost overruns.
-                        
-Provide concise, actionable insights based on the project data. Focus on:
-- Key risks and their impact
-- Budget overruns or savings
-- Delivery status and blockers
-- Recommendations for leadership"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""Project Data:
+            response = llm.invoke(
+                f"""
+You are a PMO AI assistant helping leaders understand risks, delays and cost overruns.
+
+Provide concise actionable insights based on project data.
+
+Focus on:
+- Key risks
+- Budget overruns
+- Delivery delays
+- Leadership recommendations
+
+Project Data:
 {context}
 
-Question:
-{question}"""
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=500
+User Question:
+{question}
+"""
             )
-            
+
             st.subheader("💬 AI Response")
-            st.write(response.choices[0].message.content)
-            
-            # Show sources
+            st.write(response.content)
+
             with st.expander("📊 Data Sources"):
                 st.text(context[:2000] + "..." if len(context) > 2000 else context)
 
