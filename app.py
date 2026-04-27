@@ -1,365 +1,256 @@
 import os
-import streamlit as st
 import pandas as pd
-from langchain_openai import ChatOpenAI
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_openai import OpenAIEmbeddings
+import streamlit as st
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_experimental.agents import create_pandas_dataframe_agent
+from langchain_community.document_loaders import PyPDFLoader
 
-# Page config
-st.set_page_config(page_title="PMO AI Assistant", page_icon="🤖", layout="wide")
+from langchain.tools import tool
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.memory import ConversationSummaryBufferMemory
+from langchain_core.prompts import ChatPromptTemplate
 
+
+# -------------------------------------------------------
+# Page Configuration
+# -------------------------------------------------------
+st.set_page_config(page_title="PMO Agentic AI", page_icon="🤖", layout="wide")
+st.title("🤖 Agentic PMO Assistant")
+st.write("Ask about risks, costs, blockers, initiatives, or responsibilities.")
+
+
+# -------------------------------------------------------
+# Load Data
+# -------------------------------------------------------
 @st.cache_data
 def load_data():
-    dataframes = {}
-
+    dfs = {}
     for file in os.listdir("."):
         if file.endswith(".csv"):
-            df_name = file.replace(".csv", "").replace(" ", "_").lower()
-            dataframes[df_name] = pd.read_csv(file)
-
-    loader = PyPDFLoader("RACI.pdf")
-    docs = loader.load()
-
-    return dataframes, docs
-
+            name = file.replace(".csv", "").replace(" ", "_").lower()
+            dfs[name] = pd.read_csv(file)
+    docs = PyPDFLoader("RACI.pdf").load()
+    return dfs, docs
 
 dataframes, docs = load_data()
 
-def get_schema_info(dataframes):
-    schema_info = {}
 
-    for name, df in dataframes.items():
-        schema_info[name] = {
-            "columns": list(df.columns),
-            "rows": len(df)
-        }
+# -------------------------------------------------------
+# Schema Summary for Routing
+# -------------------------------------------------------
+def build_schema_summary(dfs):
+    summary = []
+    for name, df in dfs.items():
+        summary.append(f"{name}: {list(df.columns)}")
+    return "\n".join(summary)
 
-    return schema_info
-
-
-schema_info = get_schema_info(dataframes)
+schema_summary = build_schema_summary(dataframes)
 
 
-def detect_relationships(dataframes):
-    relationships = []
+# -------------------------------------------------------
+# LLMs
+# -------------------------------------------------------
+llm_router = ChatOpenAI(api_key=st.secrets["OPENAI_API_KEY"], temperature=0)
+llm_agent = ChatOpenAI(api_key=st.secrets["OPENAI_API_KEY"], temperature=0.4)
 
-    names = list(dataframes.keys())
 
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            df1 = dataframes[names[i]]
-            df2 = dataframes[names[j]]
-
-            common_cols = list(
-                set(df1.columns).intersection(set(df2.columns))
-            )
-
-            if common_cols:
-                relationships.append(
-                    f"{names[i]} ↔ {names[j]} via {common_cols}"
-                )
-
-    if not relationships:
-        relationships.append(
-        "No direct relationships detected. Use column similarity and business context."
-    )
-    return relationships
-
-relationships = detect_relationships(dataframes)
+# -------------------------------------------------------
+# Vector Store (RACI)
+# -------------------------------------------------------
 @st.cache_resource
-def load_vector_store(docs):
-    embeddings = OpenAIEmbeddings(
-        api_key=st.secrets["OPENAI_API_KEY"]
-    )
+def build_raci_vectorstore(docs):
+    embeddings = OpenAIEmbeddings(api_key=st.secrets["OPENAI_API_KEY"])
+    vs = FAISS.from_documents(docs, embeddings)
+    return vs.as_retriever()
 
-    vectorstore = FAISS.from_documents(
-        docs,
-        embeddings
-    )
-
-    return vectorstore.as_retriever()
+retriever = build_raci_vectorstore(docs)
 
 
-retriever = load_vector_store(docs)
+# -------------------------------------------------------
+# Persona Configuration
+# -------------------------------------------------------
+PERSONA_CONFIG = {
+    "Director": {
+        "detail_level": "summary",
+        "filters": {"Status": ["Delayed", "Blocked", "At Risk"]},
+        "focus_tables": ["initiative_jira_data", "revised_raw_cost_data"]
+    },
+    "Project Manager": {
+        "detail_level": "detailed",
+        "filters": {"Status": ["Open", "Blocked", "In Progress"]},
+        "focus_tables": ["epic", "feature-initiative_jira", "revised_raw_risk_data"]
+    },
+    "CIO": {
+        "detail_level": "executive",
+        "filters": {},
+        "focus_tables": ["initiative_jira_data", "revised_raw_cost_data"]
+    }
+}
+
+def get_persona_context(persona, dfs):
+    cfg = PERSONA_CONFIG[persona]
+    summary = []
+
+    for table in cfg["focus_tables"]:
+        if table not in dfs:
+            continue
+        df = dfs[table].copy()
+
+        for col, values in cfg["filters"].items():
+            if col in df.columns:
+                df = df[df[col].isin(values)]
+
+        summary.append(f"{table}: {len(df)} records")
+
+    return "\n".join(summary)
 
 
-@st.cache_resource
-def load_llm():
-    return ChatOpenAI(
-        api_key=st.secrets["OPENAI_API_KEY"],
-        temperature=0.7
-    )
+# -------------------------------------------------------
+# Table Router
+# -------------------------------------------------------
+def select_relevant_tables(question: str):
+    msg = f"""
+Question: "{question}"
 
-# UI Header
-st.title("🤖 PMO AI Assistant")
-st.markdown("**Ask questions about project health, risks, costs, and delivery**")
+Available tables and schemas:
+{schema_summary}
 
-persona = st.selectbox(
-    "Select Stakeholder Persona",
-    ["Director", "Project Manager", "CIO"]
+Return ONLY a JSON list of table names necessary to answer this.
+"""
+    response = llm_router.invoke(msg)
+
+    import json
+    try:
+        return json.loads(response.content)
+    except:
+        return []
+
+
+# -------------------------------------------------------
+# PMO Tools
+# -------------------------------------------------------
+@tool
+def get_initiative_status(initiative_name: str):
+    df = dataframes["initiative_jira_data"]
+    match = df[df["Initiative_Name"].str.contains(initiative_name, case=False, na=False)]
+    return match.to_dict(orient="records")
+
+
+@tool
+def get_risks_by_severity(severity: str):
+    df = dataframes["revised_raw_risk_data"]
+    match = df[df["Impact"].str.lower() == severity.lower()]
+    return match.to_dict(orient="records")
+
+
+@tool
+def get_budget_variance(initiative_id: str = None):
+    df = dataframes["revised_raw_cost_data"]
+    if initiative_id:
+        df = df[df["Initiative_ID"] == initiative_id]
+
+    variance = df["Actual_Cost_USD"].sum() - df["Planned_Budget_USD"].sum()
+    over = df[df["Actual_Cost_USD"] > df["Planned_Budget_USD"]]
+
+    return {
+        "variance": variance,
+        "over_budget_items": over.to_dict(orient="records")
+    }
+
+
+@tool
+def search_raci(query: str):
+    docs = retriever.invoke(query)
+    return "\n".join([d.page_content for d in docs[:3]])
+
+
+tools = [get_initiative_status, get_risks_by_severity, get_budget_variance, search_raci]
+
+
+# -------------------------------------------------------
+# Memory
+# -------------------------------------------------------
+memory = ConversationSummaryBufferMemory(
+    llm=ChatOpenAI(api_key=st.secrets["OPENAI_API_KEY"], temperature=0),
+    max_token_limit=1000,
+    return_messages=True
 )
-if persona == "Director":
-    
-    col1, col2, col3, col4 = st.columns(4)
 
-    # On track initiatives
-    on_track_count = len(
-        dataframes["initiative_jira_data"][
-            dataframes["initiative_jira_data"]["Status"].isin(["On Track", "Completed"])
-        ]
-    )
 
-    # Budget variance
-    budget_variance = (
-        dataframes["revised_raw_cost_data"]["Actual_Cost_USD"].sum() -
-        dataframes["revised_raw_cost_data"]["Planned_Budget_USD"].sum()
-    )
+# -------------------------------------------------------
+# Agent Prompt
+# -------------------------------------------------------
+agent_prompt = ChatPromptTemplate.from_messages([
+    ("system", """
+You are an enterprise-grade Agentic PMO AI.
 
-    # Critical risks
-    critical_risks = len(
-        dataframes["revised_raw_risk_data"][
-            dataframes["revised_raw_risk_data"]["Impact"].isin(["High", "Critical"]) &
-            dataframes["revised_raw_risk_data"]["Status"] != "Closed"
-        ]
-    )
+You MUST:
+- Decide which tools to call.
+- Use data instead of guessing.
+- Consider the persona.
+- Use the routed tables and RACI context.
 
-    col1.metric("Total Initiatives", len(dataframes["initiative_jira_data"]))
-    col2.metric("On Track", on_track_count)
-    col3.metric("Budget Variance", f"${budget_variance:,.0f}")
-    col4.metric("Critical Risks", critical_risks)
-elif persona == "Project Manager":
+Persona Context:
+{persona_context}
 
-    col1, col2, col3 = st.columns(3)
+Conversation History:
+{history}
+"""),
+    ("human", "{input}"),
+    ("placeholder", "{agent_scratchpad}")
+])
 
-    open_epics = len(
-        dataframes["epic"][
-            dataframes["epic"]["Status"] != "Done"
-        ]
-    )
 
-    open_risks = len(
-        dataframes["revised_raw_risk_data"][
-            dataframes["revised_raw_risk_data"]["Status"] != "Closed"
-        ]
-    )
+# -------------------------------------------------------
+# Agent Executor
+# -------------------------------------------------------
+agent = create_openai_tools_agent(llm_agent, tools, agent_prompt)
 
-    blocked_features = len(
-        dataframes["feature-initiative_jira"][
-            dataframes["feature-initiative_jira"]["Status"] == "Blocked"
-        ]
-    )
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    memory=memory,
+    verbose=True
+)
 
-    col1.metric("Open Epics", open_epics)
-    col2.metric("Open Risks", open_risks)
-    col3.metric("Blocked Features", blocked_features)
-    
-elif persona == "CIO":
 
-    col1, col2 = st.columns(2)
+# -------------------------------------------------------
+# Unified Query Function
+# -------------------------------------------------------
+def run_pmo_agent(question: str, persona: str):
+    persona_context = get_persona_context(persona, dataframes)
+    routed_tables = select_relevant_tables(question)
+    raci_docs = retriever.invoke(question)
+    raci_text = "\n".join([d.page_content for d in raci_docs])
 
-    investment_at_risk = dataframes["revised_raw_cost_data"][
-        dataframes["revised_raw_cost_data"]["Actual_Cost_USD"] >
-        dataframes["revised_raw_cost_data"]["Planned_Budget_USD"]
-    ]["Actual_Cost_USD"].sum()
+    full_input = f"""
+User asked: {question}
 
-    strategic_delays = len(
-        dataframes["initiative_jira_data"][
-            dataframes["initiative_jira_data"]["Status"] == "Delayed"
-        ]
-    )
+Persona: {persona}
+Persona Context:
+{persona_context}
 
-    col1.metric(
-        "Investment at Risk",
-        f"${investment_at_risk:,.0f}"
-    )
-
-    col2.metric(
-        "Strategic Delays",
-        strategic_delays
-    )
-@st.cache_resource
-def load_pmo_agent():
-    agents = {}
-
-    for name, df in dataframes.items():
-        agents[name] = create_pandas_dataframe_agent(
-            load_llm(),
-            df,
-            verbose=True,
-            allow_dangerous_code=True
-        )
-
-    return agents
-
-pmo_agents = load_pmo_agent()
-# Sidebar with data overview
-with st.sidebar:
-    st.sidebar.write("Loaded Tables:")
-    st.sidebar.write(list(dataframes.keys()))
-    st.metric("Initiatives", len(dataframes["initiative_jira_data"]))
-    st.metric("Features", len(dataframes["feature-initiative_jira"]))
-    st.metric("Epics", len(dataframes["epic"]))
-    st.metric("Risks", len(dataframes["revised_raw_risk_data"]))
-    st.subheader("💰 Cost Summary")
-    total_budget = dataframes["revised_raw_cost_data"]['Planned_Budget_USD'].sum()
-    total_actual = dataframes["revised_raw_cost_data"]['Actual_Cost_USD'].sum()
-    st.metric("Total Budget", f"${total_budget:,.0f}")
-    st.metric("Total Actual", f"${total_actual:,.0f}")
-    st.metric("Variance", f"${total_budget - total_actual:,.0f}")
-    
-    st.subheader("⚠️ Risk Summary")
-    risk_status = dataframes["revised_raw_risk_data"]['Status'].value_counts()
-    for status, count in risk_status.items():
-        st.write(f"- {status}: {count}")
-
-# Example questions
-st.subheader("💡 Example Questions")
-
-col1, col2, col3, col4 = st.columns(4) 
-
-with col1:
-    if st.button("Why is Hypercare high risk?"):
-        st.session_state.question = "Why is Hypercare high risk?"
-
-with col2:
-    if st.button("Which initiatives are over budget?"):
-        st.session_state.question = "Which initiatives are over budget?"
-
-with col3:
-    if st.button("What should leadership focus on today?"):
-        st.session_state.question = "What should leadership focus on today?"
-
-with col4:
-    if st.button("Summarize project health"):
-        st.session_state.question = "Summarize overall project health"
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-# Chat input
-question = st.chat_input("Ask about project health, risks, costs, or delivery...")
-
-# Use button question if set
-if "question" in st.session_state and st.session_state.question:
-    question = st.session_state.question
-    st.session_state.question = None
-
-if question:
-    api_key = st.secrets.get("OPENAI_API_KEY", None)
-
-    if not api_key:
-        st.warning("⚠️ OpenAI API key not configured.")
-        st.info("Add OPENAI_API_KEY in secrets.toml")
-
-    else:
-        llm = load_llm()
-
-        with st.spinner("🤔 Analyzing project data..."):
-
-            try:
-                # Dynamically select best table based on schema similarity
-                question_lower = str(question).lower()
-
-                best_table = None
-                best_score = 0
-
-                for table_name, df in dataframes.items():
-
-                    score = 0
-
-                    for col in df.columns:
-                        if col.lower() in question_lower:
-                            score += 1
-
-                    if score > best_score:
-                        best_score = score
-                        best_table = table_name
-
-                if best_table:
-                    data_response = pmo_agents[best_table].invoke(
-                        {"input": str(question)}
-                    )
-                    structured_output = data_response["output"]
-
-                else:
-                    structured_output = "No relevant dataset identified."
-
-            except Exception as e:
-                structured_output = f"Agent Error: {str(e)}"
-                data_response = {"output": structured_output}
-
-            rag_docs = retriever.invoke(str(question))
-
-            rag_context = "\n".join(
-                [doc.page_content for doc in rag_docs]
-            )
-
-            response = llm.invoke(
-                f"""
-You are an intelligent PMO AI Assistant.
-
-Selected Persona: {persona}
-
-Response Rules:
-
-Director:
-- Keep concise
-- Highlight decisions
-- Focus on portfolio impact
-- Show only top 3 priorities
-
-Project Manager:
-- Show blockers
-- Show execution risks
-- Provide mitigation actions
-
-CIO:
-- Focus on strategic impact
-- Budget exposure
-- Governance risks
-
-Chat History:
-{st.session_state.chat_history}
+Suggested Relevant Tables:
+{routed_tables}
 
 RACI Context:
-{rag_context}
-
-Structured Data Insights:
-{structured_output}
-
-Available Tables:
-{list(dataframes.keys())}
-
-Schema Information:
-{schema_info}
-
-Detected Relationships:
-{relationships}
-
-Use relationships between datasets dynamically.
-Join tables when common columns exist.
-
-User Question:
-{question}
-
-Answer using actual project data.
+{raci_text}
 """
-            )
 
-        with st.chat_message("user"):
-            st.write(question)
+    result = agent_executor.invoke({"input": full_input})
+    return result["output"]
 
-        with st.chat_message("assistant"):
-            st.write(response.content)
 
-        st.session_state.chat_history.append({
-            "user": question,
-            "assistant": response.content
-        })
+# -------------------------------------------------------
+# UI
+# -------------------------------------------------------
+persona = st.selectbox("Select Persona", ["Director", "Project Manager", "CIO"])
+question = st.text_input("Ask a PMO question (risk, blockers, cost, etc.)")
 
-        with st.expander("📊 Data Analysis Used"):
-             st.write(structured_output)
+if question:
+    with st.spinner("Analyzing project portfolio..."):
+        answer = run_pmo_agent(question, persona)
 
-# Footer
-st.markdown("---")
-st.caption("🚀 PMO AI Assistant | Deploy on Streamlit Cloud")
+    st.subheader("📌 Answer")
+    st.write(answer)
