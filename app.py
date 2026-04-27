@@ -108,49 +108,66 @@ Question: "{question}"
 Available datasets:
 {schema_summary}
 
-Return only a JSON list of the table names relevant.
+Return only a JSON list of table names that are relevant.
 """
-    resp = router_llm.invoke(msg)
+
+    response = router_llm.invoke(msg)
 
     import json
     try:
-        return json.loads(resp.content)
+        return json.loads(response.content)
     except:
         return []
 
 
 # -------------------------------------------------------
-# PMO TOOLS
+# PMO TOOLS (STRICTLY TYPED — FIXED)
 # -------------------------------------------------------
 @tool
-def get_initiative_status(name: str):
+def get_initiative_status(name: str) -> list:
+    """Return initiative status by name."""
     df = dataframes["initiative_jira_data"]
+    if "Initiative_Name" not in df.columns:
+        return []
     match = df[df["Initiative_Name"].str.contains(name, case=False, na=False)]
     return match.to_dict(orient="records")
 
 
 @tool
-def get_risks_by_severity(level: str):
+def get_risks_by_severity(level: str) -> list:
+    """Return risks filtered by severity."""
     df = dataframes["revised_raw_risk_data"]
-    m = df[df["Impact"].str.lower() == level.lower()]
-    return m.to_dict(orient="records")
+    if "Impact" not in df.columns:
+        return []
+    match = df[df["Impact"].str.lower() == level.lower()]
+    return match.to_dict(orient="records")
 
 
 @tool
-def get_budget_variance(initiative_id: str = None):
+def get_budget_variance(initiative_id: str | None = None) -> dict:
+    """Return cost variance and over-budget items."""
     df = dataframes["revised_raw_cost_data"]
+
     if initiative_id:
-        df = df[df["Initiative_ID"] == initiative_id]
-    variance = df["Actual_Cost_USD"].sum() - df["Planned_Budget_USD"].sum()
-    over = df[df["Actual_Cost_USD"] > df["Planned_Budget_USD"]]
-    return {
-        "variance": variance,
-        "over_budget_items": over.to_dict(orient="records")
-    }
+        if "Initiative_ID" in df.columns:
+            df = df[df["Initiative_ID"] == initiative_id]
+
+    actual = float(df["Actual_Cost_USD"].sum())
+    planned = float(df["Planned_Budget_USD"].sum())
+    variance = actual - planned
+
+    if "Actual_Cost_USD" in df.columns and "Planned_Budget_USD" in df.columns:
+        over = df[df["Actual_Cost_USD"] > df["Planned_Budget_USD"]]
+        over_list = over.to_dict(orient="records")
+    else:
+        over_list = []
+
+    return {"variance": variance, "over_budget_items": over_list}
 
 
 @tool
-def search_raci(query: str):
+def search_raci(query: str) -> str:
+    """Search role responsibilities in RACI PDF."""
     docs = retriever.invoke(query)
     return "\n".join([d.page_content for d in docs[:3]])
 
@@ -162,7 +179,10 @@ TOOLS = {
     "search_raci": search_raci
 }
 
-# LLM with tool-calling enabled
+
+# -------------------------------------------------------
+# MAIN AGENT LLM (TOOL CALLING)
+# -------------------------------------------------------
 agent_llm = ChatOpenAI(
     model="gpt-4.1",
     temperature=0.4,
@@ -171,64 +191,63 @@ agent_llm = ChatOpenAI(
 
 
 # -------------------------------------------------------
-# PMO AGENT FUNCTION
+# AGENT LOGIC
 # -------------------------------------------------------
 def run_pmo_agent(question: str, persona: str):
     persona_context = get_persona_context(persona, dataframes)
-    routed_tables = select_tables(question)
+    routed = select_tables(question)
     raci_docs = retriever.invoke(question)
     raci_text = "\n".join([d.page_content for d in raci_docs])
 
-    system_msg = f"""
-You are an enterprise PMO AI with access to structured datasets and tools.
+    system_prompt = f"""
+You are an enterprise PMO AI assistant.
 
 Persona: {persona}
 Persona Context:
 {persona_context}
 
-Relevant Tables Suggested: {routed_tables}
+Relevant Tables Suggested:
+{routed}
 
 RACI Context:
 {raci_text}
+
+Use tools to answer questions when data lookup is required.
 """
 
-    # Invoke initial LLM to decide whether to call tools
+    # Invoke LLM (may generate a tool call)
     result = agent_llm.invoke([
-        SystemMessage(content=system_msg),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=question)
     ])
 
-    # Check for tool invocation
     tool_calls = result.additional_kwargs.get("tool_calls")
+
     if tool_calls:
-        tc = tool_calls[0]
-        tool_name = tc["function"]["name"]
-        tool_args = tc["function"]["arguments"]
+        call = tool_calls[0]
+        tool_name = call["function"]["name"]
+        tool_args = call["function"]["arguments"]
 
-        # Execute tool
         tool_fn = TOOLS[tool_name]
-        tool_output = tool_fn.run(tool_args)
+        output = tool_fn.run(tool_args)
 
-        # Summarize result for user
         final = agent_llm.invoke([
-            SystemMessage(content="Summarize the tool result clearly:"),
-            HumanMessage(content=str(tool_output))
+            SystemMessage(content="Explain the tool result clearly:"),
+            HumanMessage(content=str(output))
         ])
-
         return final.content
 
-    # If no tool call, return direct response
     return result.content
 
 
 # -------------------------------------------------------
 # STREAMLIT UI
 # -------------------------------------------------------
-persona = st.selectbox("Choose persona:", ["Director", "Project Manager", "CIO"])
-question = st.text_input("Ask about risk, cost, blockers or initiatives:")
+persona = st.selectbox("Select Persona:", ["Director", "Project Manager", "CIO"])
+question = st.text_input("Ask a PMO question (risks, blockers, costs, initiatives)...")
 
 if question:
     with st.spinner("Analyzing PMO data..."):
         answer = run_pmo_agent(question, persona)
-    st.subheader("🔍 AI Response")
+    st.subheader("📌 Response")
     st.write(answer)
