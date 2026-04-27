@@ -181,22 +181,19 @@ elif persona == "CIO":
     )
 @st.cache_resource
 def load_pmo_agent():
-    combined_df = pd.concat(
-        [
-            df.assign(source_table=name)
-            for name, df in dataframes.items()
-        ],
-        ignore_index=True,
-        sort=False
-    )
+    agents = {}
 
-    return create_pandas_dataframe_agent(
-        load_llm(),
-        combined_df,
-        verbose=True,
-        allow_dangerous_code=True
-    )
-pmo_agent = load_pmo_agent()
+    for name, df in dataframes.items():
+        agents[name] = create_pandas_dataframe_agent(
+            load_llm(),
+            df,
+            verbose=True,
+            allow_dangerous_code=True
+        )
+
+    return agents
+
+pmo_agents = load_pmo_agent()
 # Sidebar with data overview
 with st.sidebar:
     st.sidebar.write("Loaded Tables:")
@@ -260,11 +257,32 @@ if question:
         with st.spinner("🤔 Analyzing project data..."):
 
             try:
-                data_response = pmo_agent.invoke(
-                    {"input": str(question)}
-                )
+                # Dynamically select best table based on schema similarity
+                question_lower = str(question).lower()
 
-                structured_output = data_response["output"]
+                best_table = None
+                best_score = 0
+
+                for table_name, df in dataframes.items():
+
+                    score = 0
+
+                    for col in df.columns:
+                        if col.lower() in question_lower:
+                            score += 1
+
+                    if score > best_score:
+                        best_score = score
+                        best_table = table_name
+
+                if best_table:
+                    data_response = pmo_agents[best_table].invoke(
+                        {"input": str(question)}
+                    )
+                    structured_output = data_response["output"]
+
+                else:
+                    structured_output = "No relevant dataset identified."
 
             except Exception as e:
                 structured_output = f"Agent Error: {str(e)}"
