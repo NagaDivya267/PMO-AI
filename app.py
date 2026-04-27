@@ -113,6 +113,72 @@ for name, df in normalized_dfs.items():
 if feature_df is None:
     # fallback to initiative_df so dashboard never breaks
     feature_df = initiative_df
+
+
+# ---------------------------------------------------
+# RELATIONSHIP DETECTOR
+# ---------------------------------------------------
+def detect_relationships(normalized_dfs):
+    relationships = []
+    dataset_names = list(normalized_dfs.keys())
+
+    for i in range(len(dataset_names)):
+        for j in range(i + 1, len(dataset_names)):
+            df1_name = dataset_names[i]
+            df2_name = dataset_names[j]
+            df1 = normalized_dfs[df1_name]
+            df2 = normalized_dfs[df2_name]
+
+            common_cols = list(
+                set(df1.columns).intersection(
+                    set(df2.columns)
+                )
+            )
+
+            for col in common_cols:
+                try:
+                    # Handle duplicate column names
+                    if isinstance(df1[col], pd.DataFrame):
+                        series1 = df1[col].iloc[:, 0]
+                    else:
+                        series1 = df1[col]
+
+                    if isinstance(df2[col], pd.DataFrame):
+                        series2 = df2[col].iloc[:, 0]
+                    else:
+                        series2 = df2[col]
+
+                    vals1 = set(
+                        series1.dropna()
+                        .astype(str)
+                        .unique()
+                    )
+                    vals2 = set(
+                        series2.dropna()
+                        .astype(str)
+                        .unique()
+                    )
+
+                    overlap = vals1.intersection(vals2)
+
+                    if overlap:
+                        relationships.append({
+                            "table_1": df1_name,
+                            "table_2": df2_name,
+                            "column": col,
+                            "matches": len(overlap)
+                        })
+
+                except Exception:
+                    continue
+
+    return relationships
+
+
+# Detect table relationships
+relationship_graph = detect_relationships(normalized_dfs)
+
+
 # ---------------------------------------------------
 # VECTOR STORE
 # ---------------------------------------------------
