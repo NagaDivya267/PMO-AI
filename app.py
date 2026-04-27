@@ -7,27 +7,26 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 
 from langchain.tools import tool
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 
 
 # -------------------------------------------------------
 # STREAMLIT CONFIG
 # -------------------------------------------------------
-st.set_page_config(page_title="Agentic PMO AI", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Agentic PMO Assistant", page_icon="🤖", layout="wide")
 st.title("🤖 Agentic PMO Assistant")
 
 
 # -------------------------------------------------------
-# LOAD DATAFILES
+# LOAD ALL PROJECT DATA
 # -------------------------------------------------------
 @st.cache_data
 def load_data():
     dfs = {}
-    for name in os.listdir("."):
-        if name.endswith(".csv"):
-            df_name = name.replace(".csv", "").replace(" ", "_").lower()
-            dfs[df_name] = pd.read_csv(name)
+    for fname in os.listdir("."):
+        if fname.endswith(".csv"):
+            dfname = fname.replace(".csv", "").replace(" ", "_").lower()
+            dfs[dfname] = pd.read_csv(fname)
 
     docs = PyPDFLoader("RACI.pdf").load()
     return dfs, docs
@@ -36,19 +35,19 @@ dataframes, docs = load_data()
 
 
 # -------------------------------------------------------
-# BUILD RACI VECTOR STORE
+# LOAD RACI VECTOR STORE
 # -------------------------------------------------------
 @st.cache_resource
-def load_vectorstore(docs):
+def load_vectorstore(documents):
     embeddings = OpenAIEmbeddings(api_key=st.secrets["OPENAI_API_KEY"])
-    vs = FAISS.from_documents(docs, embeddings)
-    return vs.as_retriever()
+    store = FAISS.from_documents(documents, embeddings)
+    return store.as_retriever()
 
 retriever = load_vectorstore(docs)
 
 
 # -------------------------------------------------------
-# PERSONA CONFIGURATION
+# PERSONA CONFIG
 # -------------------------------------------------------
 PERSONA_CONFIG = {
     "Director": {
@@ -69,9 +68,9 @@ PERSONA_CONFIG = {
 }
 
 
-def get_persona_context(persona, dfs):
+def get_persona_context(persona: str, dfs: dict) -> str:
     cfg = PERSONA_CONFIG[persona]
-    results = []
+    result = []
 
     for table in cfg["focus_tables"]:
         if table not in dfs:
@@ -81,17 +80,18 @@ def get_persona_context(persona, dfs):
         for col, values in cfg["filters"].items():
             if col in df.columns:
                 df = df[df[col].isin(values)]
-        results.append(f"{table}: {len(df)} relevant records")
 
-    return "\n".join(results)
+        result.append(f"{table}: {len(df)} relevant items")
+
+    return "\n".join(result)
 
 
 # -------------------------------------------------------
-# TABLE ROUTER USING LLM
+# LLM FOR ROUTING DATASET SELECTION
 # -------------------------------------------------------
 router_llm = ChatOpenAI(
-    temperature=0,
     model="gpt-4.1",
+    temperature=0,
     api_key=st.secrets["OPENAI_API_KEY"]
 )
 
@@ -103,12 +103,12 @@ schema_summary = "\n".join(
 
 def select_tables(question: str):
     msg = f"""
-Question: "{question}"
+Question: {question}
 
-Available datasets:
+Here are available datasets and columns:
 {schema_summary}
 
-Return only a JSON list of table names that are relevant.
+Return a JSON list of the table names required to answer the question.
 """
 
     response = router_llm.invoke(msg)
@@ -121,12 +121,12 @@ Return only a JSON list of table names that are relevant.
 
 
 # -------------------------------------------------------
-# PMO TOOLS (STRICTLY TYPED — FIXED)
+# PMO TOOLS (STRICTLY TYPED + SERIALIZABLE)
 # -------------------------------------------------------
 @tool
 def get_initiative_status(name: str) -> list:
-    """Return initiative status by name."""
-    df = dataframes["initiative_jira_data"]
+    """Return matching initiatives from initiative_jira_data."""
+    df = dataframes.get("initiative_jira_data", pd.DataFrame())
     if "Initiative_Name" not in df.columns:
         return []
     match = df[df["Initiative_Name"].str.contains(name, case=False, na=False)]
@@ -136,7 +136,7 @@ def get_initiative_status(name: str) -> list:
 @tool
 def get_risks_by_severity(level: str) -> list:
     """Return risks filtered by severity."""
-    df = dataframes["revised_raw_risk_data"]
+    df = dataframes.get("revised_raw_risk_data", pd.DataFrame())
     if "Impact" not in df.columns:
         return []
     match = df[df["Impact"].str.lower() == level.lower()]
@@ -145,29 +145,28 @@ def get_risks_by_severity(level: str) -> list:
 
 @tool
 def get_budget_variance(initiative_id: str | None = None) -> dict:
-    """Return cost variance and over-budget items."""
-    df = dataframes["revised_raw_cost_data"]
+    """Return total variance and list of over-budget items."""
+    df = dataframes.get("revised_raw_cost_data", pd.DataFrame())
 
-    if initiative_id:
-        if "Initiative_ID" in df.columns:
-            df = df[df["Initiative_ID"] == initiative_id]
+    if initiative_id and "Initiative_ID" in df.columns:
+        df = df[df["Initiative_ID"] == initiative_id]
+
+    if "Actual_Cost_USD" not in df.columns or "Planned_Budget_USD" not in df.columns:
+        return {"variance": 0.0, "over_budget_items": []}
 
     actual = float(df["Actual_Cost_USD"].sum())
     planned = float(df["Planned_Budget_USD"].sum())
     variance = actual - planned
 
-    if "Actual_Cost_USD" in df.columns and "Planned_Budget_USD" in df.columns:
-        over = df[df["Actual_Cost_USD"] > df["Planned_Budget_USD"]]
-        over_list = over.to_dict(orient="records")
-    else:
-        over_list = []
+    over = df[df["Actual_Cost_USD"] > df["Planned_Budget_USD"]]
+    over_items = over.to_dict(orient="records")
 
-    return {"variance": variance, "over_budget_items": over_list}
+    return {"variance": variance, "over_budget_items": over_items}
 
 
 @tool
 def search_raci(query: str) -> str:
-    """Search role responsibilities in RACI PDF."""
+    """Search the RACI PDF for responsibility insights."""
     docs = retriever.invoke(query)
     return "\n".join([d.page_content for d in docs[:3]])
 
@@ -176,46 +175,51 @@ TOOLS = {
     "get_initiative_status": get_initiative_status,
     "get_risks_by_severity": get_risks_by_severity,
     "get_budget_variance": get_budget_variance,
-    "search_raci": search_raci
+    "search_raci": search_raci,
 }
 
 
 # -------------------------------------------------------
-# MAIN AGENT LLM (TOOL CALLING)
+# MAIN AGENT LLM (TOOL CALLING ENABLED)
 # -------------------------------------------------------
 agent_llm = ChatOpenAI(
     model="gpt-4.1",
     temperature=0.4,
-    api_key=st.secrets["OPENAI_API_KEY"]
+    api_key=st.secrets["OPENAI_API_KEY"],
+    response_format="text"
 ).bind_tools(list(TOOLS.values()))
 
 
 # -------------------------------------------------------
-# AGENT LOGIC
+# MAIN AGENT PIPELINE (PATCHED + GUARANTEED OUTPUT)
 # -------------------------------------------------------
-def run_pmo_agent(question: str, persona: str):
-    persona_context = get_persona_context(persona, dataframes)
-    routed = select_tables(question)
+def run_pmo_agent(question: str, persona: str) -> str:
+    persona_ctx = get_persona_context(persona, dataframes)
+    routed_tables = select_tables(question)
+
     raci_docs = retriever.invoke(question)
-    raci_text = "\n".join([d.page_content for d in raci_docs])
+    raci_context = "\n".join([doc.page_content for doc in raci_docs])
 
     system_prompt = f"""
 You are an enterprise PMO AI assistant.
 
 Persona: {persona}
 Persona Context:
-{persona_context}
+{persona_ctx}
 
-Relevant Tables Suggested:
-{routed}
+Likely Relevant Tables:
+{routed_tables}
 
 RACI Context:
-{raci_text}
+{raci_context}
 
-Use tools to answer questions when data lookup is required.
+Rules:
+- Call tools when data lookup is needed.
+- Otherwise answer using available context.
+- Always respond in a clear, readable summary.
 """
 
-    # Invoke LLM (may generate a tool call)
+    # Request initial reasoning
     result = agent_llm.invoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=question)
@@ -223,19 +227,39 @@ Use tools to answer questions when data lookup is required.
 
     tool_calls = result.additional_kwargs.get("tool_calls")
 
+    # -------------------------------------------------------
+    # If the model wants to call a tool
+    # -------------------------------------------------------
     if tool_calls:
         call = tool_calls[0]
         tool_name = call["function"]["name"]
-        tool_args = call["function"]["arguments"]
+        raw_args = call["function"]["arguments"]
+
+        # Convert args safely
+        import json
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args)
+            except:
+                args = {"name": raw_args}
+        else:
+            args = raw_args
 
         tool_fn = TOOLS[tool_name]
-        output = tool_fn.run(tool_args)
+        tool_output = tool_fn.invoke(args)
 
-        final = agent_llm.invoke([
-            SystemMessage(content="Explain the tool result clearly:"),
-            HumanMessage(content=str(output))
+        # Summarize the tool output
+        summarized = agent_llm.invoke([
+            SystemMessage(content="Summarize the PMO data clearly:"),
+            HumanMessage(content=str(tool_output))
         ])
-        return final.content
+        return summarized.content
+
+    # -------------------------------------------------------
+    # Otherwise return direct text answer
+    # -------------------------------------------------------
+    if isinstance(result.content, list):
+        return "\n".join([m.get("text", "") for m in result.content])
 
     return result.content
 
@@ -244,10 +268,11 @@ Use tools to answer questions when data lookup is required.
 # STREAMLIT UI
 # -------------------------------------------------------
 persona = st.selectbox("Select Persona:", ["Director", "Project Manager", "CIO"])
-question = st.text_input("Ask a PMO question (risks, blockers, costs, initiatives)...")
+question = st.text_input("Ask a PMO question (risks, blockers, costs, initiatives)…")
 
 if question:
-    with st.spinner("Analyzing PMO data..."):
+    with st.spinner("Analyzing PMO data…"):
         answer = run_pmo_agent(question, persona)
+
     st.subheader("📌 Response")
     st.write(answer)
