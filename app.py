@@ -2,406 +2,896 @@ import os
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_core.tools import StructuredTool
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from langchain_community.document_loaders import PyPDFLoader
 
-# -------------------------------------------------------
-# STREAMLIT CONFIG
-# -------------------------------------------------------
-st.set_page_config(page_title="Enterprise PMO AI", page_icon="🤖", layout="wide")
 
-# -------------------------------------------------------
+# ---------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------
+st.set_page_config(
+    page_title="Enterprise PMO Assistant",
+    page_icon="🤖",
+    layout="wide"
+)
+
+
+# ---------------------------------------------------
 # LOAD DATA
-# -------------------------------------------------------
+# ---------------------------------------------------
 @st.cache_data
 def load_data():
     dfs = {}
-    for fname in os.listdir("."):
-        if fname.endswith(".csv"):
-            name = fname.replace(".csv", "").replace(" ", "_").lower()
-            dfs[name] = pd.read_csv(fname)
-    docs = PyPDFLoader("RACI.pdf").load()
-    return dfs, docs
+
+    for file in os.listdir("."):
+        if file.endswith(".csv"):
+            table_name = file.replace(".csv", "").replace(" ", "_").lower()
+
+            try:
+                dfs[table_name] = pd.read_csv(file)
+            except Exception:
+                pass
+
+    all_docs = []
+
+    pdf_files = [
+        "RACI.pdf",
+        "Operational_Decision_RACI_PMO.pdf"
+    ]
+
+    for pdf in pdf_files:
+        if os.path.exists(pdf):
+            try:
+                loaded_docs = PyPDFLoader(pdf).load()
+
+                # tag document source
+                for doc in loaded_docs:
+                    doc.metadata["source_type"] = pdf
+
+                all_docs.extend(loaded_docs)
+
+            except Exception:
+                pass
+
+    return dfs, all_docs
+
 
 dataframes, docs = load_data()
 
-# -------------------------------------------------------
-# RACI VECTORSTORE
-# -------------------------------------------------------
+
+# ---------------------------------------------------
+# NORMALIZE COLUMN NAMES
+# ---------------------------------------------------
+def normalize_col(col):
+    return str(col).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def normalize_dataframe(df):
+    df = df.copy()
+    df.columns = [normalize_col(c) for c in df.columns]
+    return df
+
+
+normalized_dfs = {
+    name: normalize_dataframe(df)
+    for name, df in dataframes.items()
+}
+
+
+# ---------------------------------------------------
+# IDENTIFY DATASETS
+# ---------------------------------------------------
+# IDENTIFY DATASETS (robust)
+initiative_df = None
+feature_df = None
+epic_df = None
+cost_df = None
+risk_df = None
+
+for name, df in normalized_dfs.items():
+    lower_name = name.lower()
+
+    if any(k in lower_name for k in ["initiative", "project"]):
+        initiative_df = df
+
+    elif any(k in lower_name for k in ["feature", "story"]):
+        feature_df = df
+
+    elif "epic" in lower_name:
+        epic_df = df
+
+    elif any(k in lower_name for k in ["cost", "budget"]):
+        cost_df = df
+
+    elif "risk" in lower_name:
+        risk_df = df
+
+
+# 🔥 FALLBACK FIX (IMPORTANT)
+if feature_df is None:
+    # fallback to initiative_df so dashboard never breaks
+    feature_df = initiative_df
+# ---------------------------------------------------
+# VECTOR STORE
+# ---------------------------------------------------
 @st.cache_resource
 def load_vectorstore():
-    embeddings = OpenAIEmbeddings(api_key=st.secrets["OPENAI_API_KEY"])
-    vs = FAISS.from_documents(docs, embeddings)
-    return vs.as_retriever()
+    if not docs:
+        return None
+
+    try:
+        embeddings = OpenAIEmbeddings(
+            api_key=st.secrets["OPENAI_API_KEY"]
+        )
+
+        vectorstore = FAISS.from_documents(
+            docs,
+            embeddings
+        )
+
+        return vectorstore.as_retriever()
+
+    except Exception:
+        return None
+
 
 retriever = load_vectorstore()
 
-# -------------------------------------------------------
-# NORMALIZE COLUMNS (FIX UNIQUE ISSUE)
-# -------------------------------------------------------
-def normalize_col(col):
-    return col.strip().lower().replace(" ", "_").replace("-", "_")
 
-normalized_dfs = {name: df.rename(columns={c: normalize_col(c) for c in df.columns}) 
-                  for name, df in dataframes.items()}
+# ---------------------------------------------------
+# LLM
+# ---------------------------------------------------
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.3,
+        api_key=st.secrets["OPENAI_API_KEY"]
+    )
 
-# -------------------------------------------------------
-# RELATIONSHIP DETECTION (FIXED)
-# -------------------------------------------------------
-def detect_relationships(dfs):
-    relationships = {}
-    table_names = list(dfs.keys())
-    
-    for t1 in table_names:
-        relationships[t1] = {"related": {}}
-        df1 = dfs[t1]
-        
-        for t2 in table_names:
-            if t1 == t2:
-                continue
-            df2 = dfs[t2]
-            
-            shared_cols = list(set(df1.columns).intersection(set(df2.columns)))
-            join_candidates = []
-            
-            for col in shared_cols:
-                # FIX: Use set instead of .unique()
-                vals1 = set(df1[col].dropna().astype(str).tolist())
-                vals2 = set(df2[col].dropna().astype(str).tolist())
-                
-                if len(vals1) == 0 or len(vals2) == 0:
-                    continue
-                    
-                overlap = len(vals1.intersection(vals2))
-                if overlap > 0:
-                    join_candidates.append((col, overlap))
-            
-            if join_candidates:
-                join_candidates = sorted(join_candidates, key=lambda x: -x[1])
-                relationships[t1]["related"][t2] = {
-                    "shared_columns": shared_cols,
-                    "join_candidates": join_candidates,
-                }
-    
-    return relationships
 
-relationship_graph = detect_relationships(normalized_dfs)
+agent_llm = load_llm()
 
-# -------------------------------------------------------
-# PERSONA KPI LOGIC (FIXED MUTATIONS)
-# -------------------------------------------------------
-def get_persona_kpis(persona, dfs):
-    kpis = {}
-    
+
+# ---------------------------------------------------
+# HELPERS
+# ---------------------------------------------------
+def numeric_safe(series):
+    return pd.to_numeric(series, errors="coerce")
+
+
+def find_column(df, possible_cols):
+    if df is None:
+        return None
+
+    for col in df.columns:
+        for keyword in possible_cols:
+            if keyword in col.lower():
+                return col
+
+    return None
+# ---------------------------------------------------
+# INTENT CLASSIFIER
+# ---------------------------------------------------
+def classify_user_intent(question):
+    prompt = f"""
+    Classify this PMO question into ONE category:
+
+    - cost
+    - risk
+    - schedule
+    - ownership
+    - portfolio
+    - delivery
+
+    Question:
+    {question}
+
+    Return only category name.
+    """
+
     try:
-        if persona == "Director":
-            for name, df in dfs.items():
-                if "initiative" in name:
-                    kpis["total_initiatives"] = len(df)
-                    if "status" in df.columns:
-                        kpis["at_risk"] = len(df[df["status"].str.lower().str.contains("risk|delay", na=False)])
-                    
-                    # FIX: No mutation of original dataframe
-                    if "end_date" in df.columns:
-                        temp_df = df.copy()
-                        temp_df["end_date"] = pd.to_datetime(temp_df["end_date"], errors="coerce")
-                        temp_df["is_delayed"] = temp_df["end_date"] < pd.Timestamp.now()
-                        kpis["strategic_delays"] = temp_df["is_delayed"].sum()
-                
-                if "cost" in name:
-                    if "actual_cost_usd" in df.columns:
-                        kpis["total_spend"] = f"${df['actual_cost_usd'].sum():,.0f}"
-                        if "planned_budget_usd" in df.columns:
-                            variance = df['actual_cost_usd'].sum() - df['planned_budget_usd'].sum()
-                            kpis["budget_variance"] = f"${variance:,.0f}"
+        response = agent_llm.invoke(prompt)
+        return response.content.strip().lower()
+    except Exception:
+        return "portfolio"
+
+
+# ---------------------------------------------------
+# DATA PLANNER
+# ---------------------------------------------------
+def determine_required_data(intent):
+    data_sources = {
+        "cost": ["initiative", "cost"],
+        "risk": ["initiative", "risk"],
+        "schedule": ["initiative", "epic", "feature"],
+        "ownership": ["raci"],
+        "delivery": ["initiative", "epic", "risk"],
+        "portfolio": ["initiative", "cost", "risk", "epic"]
+    }
+
+    return data_sources.get(
+        intent,
+        ["initiative"]
+    )
+
+
+# ---------------------------------------------------
+# DIRECTOR DASHBOARD
+# ---------------------------------------------------
+def show_director_dashboard():
+    st.subheader("Director Portfolio Dashboard")
+
+    if initiative_df is None:
+        st.warning("Initiative dataset missing")
+        return
+
+    status_col = find_column(
         
-        elif persona == "Project Manager":
-            for name, df in dfs.items():
-                if "epic" in name and "status" in df.columns:
-                    kpis["open_epics"] = len(df[df["status"].str.lower() != "done"])
-                if "feature" in name and "status" in df.columns:
-                    kpis["blocked_features"] = len(df[df["status"].str.lower() == "blocked"])
-                if "risk" in name and "status" in df.columns:
-                    kpis["open_risks"] = len(df[df["status"].str.lower() != "closed"])
-        
-        elif persona == "CIO":
-            for name, df in dfs.items():
-                if "cost" in name and "actual_cost_usd" in df.columns:
-                    kpis["total_investment"] = f"${df['actual_cost_usd'].sum():,.0f}"
-                if "initiative" in name and "status" in df.columns:
-                    kpis["strategic_delays"] = len(df[df["status"].str.lower() == "delayed"])
-    
+        initiative_df,
+        ["status", "state"]
+    )
+
+    completion_col = find_column(
+        initiative_df,
+        ["completion", "progress"]
+    )
+
+    total_projects = len(initiative_df)
+
+    delayed_projects = 0
+    if status_col:
+        delayed_projects = len(
+            initiative_df[
+                initiative_df[status_col]
+                .astype(str)
+                .str.lower()
+                .isin(["delayed"])
+            ]
+        )
+
+    avg_completion = 0
+    if completion_col:
+        avg_completion = initiative_df[
+            completion_col
+        ].mean()
+
+    open_risks = len(risk_df) if risk_df is not None else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Total Initiatives", total_projects)
+    c2.metric("Delayed Projects", delayed_projects)
+    c3.metric("Portfolio Completion", f"{avg_completion:.1f}%")
+    c4.metric("Open Risks", open_risks)
+
+    if status_col:
+        fig = px.pie(
+            initiative_df,
+            names=status_col,
+            title="Portfolio Status Distribution"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    if risk_df is not None:
+        impact_col = find_column(risk_df, ["impact"])
+        probability_col = find_column(
+            risk_df,
+            ["probability", "likelihood"]
+        )
+
+        if impact_col and probability_col:
+            heatmap = risk_df.groupby(
+                [impact_col, probability_col]
+            ).size().reset_index(name="count")
+
+            fig2 = px.density_heatmap(
+                heatmap,
+                x=probability_col,
+                y=impact_col,
+                z="count",
+                text_auto=True,
+                title="Risk Heatmap"
+            )
+
+            st.plotly_chart(fig2, use_container_width=True)
+# ---------------------------------------------------
+# PM DASHBOARD
+# ---------------------------------------------------
+def show_pm_dashboard():
+    st.subheader("Project Manager Dashboard")
+
+    # -----------------------------
+    # Dataset validation
+    # -----------------------------
+    if epic_df is None:
+        st.warning("Epic dataset missing")
+        return
+
+    # Column detection
+    epic_name_col = find_column(
+        epic_df,
+        ["epic_name", "summary", "name"]
+    )
+
+    epic_status_col = find_column(
+        epic_df,
+        ["status", "state"]
+    )
+
+    epic_id_col = find_column(
+        epic_df,
+        ["epic_id", "id", "issue_key"]
+    )
+
+    cost_epic_col = None
+    actual_cost_col = None
+
+    if cost_df is not None:
+        cost_epic_col = find_column(
+            cost_df,
+            ["epic_id", "initiative_id", "id"]
+        )
+
+        actual_cost_col = find_column(
+            cost_df,
+            ["actual_cost"]
+        )
+    # -----------------------------
+    # KPI Calculations
+    # -----------------------------
+    total_epics = len(epic_df)
+
+    blocked_items = 0
+    completed_items = 0
+    in_progress_items = 0
+
+    if epic_status_col:
+        blocked_items = len(
+            epic_df[
+                epic_df[epic_status_col]
+                .astype(str)
+                .str.lower()
+                .isin(["blocked"])
+            ]
+        )
+
+        completed_items = len(
+            epic_df[
+                epic_df[epic_status_col]
+                .astype(str)
+                .str.lower()
+                .isin(["done", "completed"])
+            ]
+        )
+
+        in_progress_items = len(
+            epic_df[
+                epic_df[epic_status_col]
+                .astype(str)
+                .str.lower()
+                .isin(["in progress"])
+            ]
+        )
+
+    total_epic_cost = 0
+
+    if cost_df is not None and actual_cost_col:
+        total_epic_cost = numeric_safe(
+            cost_df[actual_cost_col]
+        ).sum()
+
+    open_risks = len(risk_df) if risk_df is not None else 0
+
+    # -----------------------------
+    # KPI Row
+    # -----------------------------
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Total Epics", total_epics)
+    c2.metric("Blocked Items", blocked_items)
+    c3.metric("Open Risks", open_risks)
+    c4.metric(
+        "Epic Cost",
+        f"${total_epic_cost/1_000_000:.1f}M"
+    )
+
+    # -----------------------------
+    # Status Pie Chart
+    # -----------------------------
+    if epic_status_col:
+        fig1 = px.pie(
+            epic_df,
+            names=epic_status_col,
+            title="Epic Status Distribution"
+        )
+
+        st.plotly_chart(
+            fig1,
+            use_container_width=True
+        )
+
+    # -----------------------------
+    # Risk Heat Map
+    # -----------------------------
+    if risk_df is not None:
+        impact_col = find_column(
+            risk_df,
+            ["impact"]
+        )
+
+        probability_col = find_column(
+            risk_df,
+            ["probability", "likelihood"]
+        )
+
+        if impact_col and probability_col:
+            heatmap_df = risk_df.groupby(
+                [impact_col, probability_col]
+            ).size().reset_index(name="count")
+
+            fig2 = px.density_heatmap(
+                heatmap_df,
+                x=probability_col,
+                y=impact_col,
+                z="count",
+                text_auto=True,
+                title="Risk Heat Map"
+            )
+
+            st.plotly_chart(
+                fig2,
+                use_container_width=True
+            )
+
+    # -----------------------------
+    # Epic-wise Cost Chart
+    # -----------------------------
+    if (
+        cost_df is not None
+        and epic_id_col
+        and cost_epic_col
+        and actual_cost_col
+    ):
+        try:
+            epic_cost_df = epic_df.merge(
+                cost_df,
+                left_on=epic_id_col,
+                right_on=cost_epic_col,
+                how="left"
+            )
+
+            if epic_name_col:
+                cost_summary = epic_cost_df.groupby(
+                    epic_name_col
+                )[actual_cost_col].sum().reset_index()
+
+                fig3 = px.bar(
+                    cost_summary,
+                    x=epic_name_col,
+                    y=actual_cost_col,
+                    title="Epic Wise Cost Distribution"
+                )
+
+                st.plotly_chart(
+                    fig3,
+                    use_container_width=True
+                )
+        except:
+            st.warning(
+                "Unable to generate epic cost chart"
+            )
+
+    # -----------------------------
+    # Epic Table
+    # -----------------------------
+    st.subheader("Epic Data Table")
+    st.dataframe(
+        epic_df.head(20),
+        use_container_width=True
+    )
+# ---------------------------------------------------
+# CIO DASHBOARD
+# ---------------------------------------------------
+def show_cio_dashboard():
+    st.subheader("CIO Strategic Dashboard")
+
+    if initiative_df is None or cost_df is None:
+        st.warning("Required datasets missing")
+        return
+
+    # Column detection
+    completion_col = find_column(initiative_df, ["completion"])
+    planned_budget_col = find_column(cost_df, ["planned"])
+    actual_cost_col = find_column(cost_df, ["actual"])
+    planned_completion_col = find_column(cost_df, ["planned_completion"])
+
+    # KPI calculations
+    portfolio_completion = (
+        initiative_df[completion_col].mean()
+        if completion_col else 0
+    )
+
+    planned_budget = (
+        numeric_safe(cost_df[planned_budget_col]).sum()
+        if planned_budget_col else 0
+    )
+
+    actual_cost = (
+        numeric_safe(cost_df[actual_cost_col]).sum()
+        if actual_cost_col else 0
+    )
+
+    forecast_cost = (
+        actual_cost / (portfolio_completion / 100)
+        if portfolio_completion > 0 else actual_cost
+    )
+
+    spi = (
+        portfolio_completion / 100 /
+        (cost_df[planned_completion_col].mean() / 100)
+        if planned_completion_col else 0
+    )
+
+    cpi = (
+        planned_budget / actual_cost
+        if actual_cost > 0 else 0
+    )
+
+    open_risks = len(risk_df) if risk_df is not None else 0
+
+    confidence = (
+        "Low" if spi < 0.8
+        else "Medium" if spi < 1
+        else "High"
+    )
+
+    # KPI ROW 1
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Completion %", f"{portfolio_completion:.1f}%")
+    c2.metric("Planned Budget", f"{planned_budget/1_000_000:.1f}M")
+    c3.metric("Total Actual Cost", f"{actual_cost/1_000_000:.1f}M")
+    c4.metric("Cost Performance Index", f"{cpi:.2f}")
+
+    # KPI ROW 2
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Forecast Cost", f"{forecast_cost/1_000_000:.1f}M")
+    c6.metric("Schedule Performance Index", f"{spi:.2f}")
+    c7.metric("Open Risks", open_risks)
+    c8.metric("Delivery Confidence", confidence)
+
+    # Risk Heatmap
+    if risk_df is not None:
+        impact_col = find_column(risk_df, ["impact"])
+        probability_col = find_column(risk_df, ["probability", "likelihood"])
+
+        if impact_col and probability_col:
+            heatmap = risk_df.groupby(
+                [impact_col, probability_col]
+            ).size().reset_index(name="count")
+
+            fig = px.density_heatmap(
+                heatmap,
+                x=probability_col,
+                y=impact_col,
+                z="count",
+                text_auto=True,
+                title="Risk Heatmap"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Budget Chart
+    initiative_name_col = find_column(cost_df, ["initiative", "name"])
+
+    if initiative_name_col and planned_budget_col and actual_cost_col:
+        budget_df = cost_df.groupby(
+            initiative_name_col
+        )[[planned_budget_col, actual_cost_col]].sum().reset_index()
+
+        fig = px.bar(
+            budget_df,
+            x=initiative_name_col,
+            y=[planned_budget_col, actual_cost_col],
+            barmode="group",
+            title="Planned vs Actual Cost"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Completion Chart
+    if completion_col:
+        fig = px.bar(
+            initiative_df,
+            x=initiative_name_col if initiative_name_col else initiative_df.index,
+            y=completion_col,
+            title="Completion % by Initiative"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Table
+    st.subheader("Initiative Details")
+    st.dataframe(initiative_df.head(10))
+# ---------------------------------------------------
+# CHATBOT ENGINE
+# ---------------------------------------------------
+def run_agent(question, persona):
+    try:
+        if initiative_df is None:
+            return "No initiative dataset found."
+
+        intent = classify_user_intent(question)
+
+        initiative_id_col = find_column(
+            initiative_df,
+            ["initiative_id", "issue_key", "id"]
+        )
+
+        initiative_name_col = find_column(
+            initiative_df,
+            ["initiative_name", "summary", "name"]
+        )
+
+        planned_budget_col = find_column(
+            cost_df,
+            ["planned_budget", "planned"]
+        )
+
+        actual_cost_col = find_column(
+            cost_df,
+            ["actual_cost", "actual"]
+        )
+
+        risk_link_col = find_column(
+            risk_df,
+            ["linked_id", "initiative_id"]
+        )
+
+        master_df = initiative_df.copy()
+
+        # Merge cost
+        if (
+            cost_df is not None
+            and initiative_id_col
+            and initiative_id_col in cost_df.columns
+        ):
+            master_df = master_df.merge(
+                cost_df,
+                on=initiative_id_col,
+                how="left",
+                suffixes=("", "_cost")
+            )
+
+        # Merge risk
+        if (
+            risk_df is not None
+            and risk_link_col
+            and initiative_id_col
+        ):
+            master_df = master_df.merge(
+                risk_df,
+                left_on=initiative_id_col,
+                right_on=risk_link_col,
+                how="left",
+                suffixes=("", "_risk")
+            )
+
+        status_col = find_column(
+            master_df,
+            ["status", "state"]
+        )
+
+        risk_impact_col = find_column(
+            master_df,
+            ["impact"]
+        )
+
+        # High Risk Projects
+        high_risk_projects = pd.DataFrame()
+
+        if risk_impact_col:
+            high_risk_projects = master_df[
+                master_df[risk_impact_col]
+                .astype(str)
+                .str.lower()
+                .str.contains(
+                    "high|critical|severe|red|p1",
+                    na=False
+                )
+            ]
+
+        # Delayed Projects
+        delayed_projects = pd.DataFrame()
+
+        if status_col:
+            delayed_projects = master_df[
+                master_df[status_col]
+                .astype(str)
+                .str.lower()
+                .isin(["delayed"])
+            ]
+
+        # Over Budget Projects
+        over_budget_projects = pd.DataFrame()
+
+        if planned_budget_col and actual_cost_col:
+            over_budget_projects = master_df[
+                numeric_safe(
+                    master_df[actual_cost_col]
+                ) >
+                numeric_safe(
+                    master_df[planned_budget_col]
+                )
+            ]
+
+        # Dynamic Intent Routing
+        if intent == "risk":
+            analysis_df = high_risk_projects
+
+        elif intent == "cost":
+            analysis_df = over_budget_projects
+
+        elif intent == "schedule":
+            analysis_df = delayed_projects
+
+        else:
+            analysis_df = master_df
+
+        if analysis_df.empty:
+            analysis_df = master_df.head(5)
+
+        summary_cols = []
+
+        for col in [
+            initiative_name_col,
+            status_col,
+            planned_budget_col,
+            actual_cost_col,
+            risk_impact_col
+        ]:
+            if col and col in analysis_df.columns:
+                summary_cols.append(col)
+
+        if summary_cols:
+            final_summary = analysis_df[
+                summary_cols
+            ].head(5)
+        else:
+            final_summary = analysis_df.head(5)
+
+        # ----------------------------
+        # Multi-document RAG retrieval
+        # ----------------------------
+        raci_context = ""
+
+        if retriever:
+            try:
+                if intent == "ownership":
+                    search_query = question + " responsibility escalation"
+
+                elif intent == "risk":
+                    search_query = question + " mitigation owner"
+
+                elif intent == "cost":
+                    search_query = question + " funding approval"
+
+                else:
+                    search_query = question
+
+                docs = retriever.invoke(search_query)
+
+                raci_context = "\n".join([
+                    doc.page_content
+                    for doc in docs[:3]
+                ])
+
+            except Exception:
+                pass
+
+        persona_guidance = {
+            "Project Manager":
+                "Focus on execution recovery, blockers and delivery actions.",
+
+            "Director":
+                "Focus on escalations, dependencies and portfolio risks.",
+
+            "CIO":
+                "Focus on financial exposure, strategic risks and executive decisions."
+        }
+
+        prompt = f"""
+You are an intelligent PMO AI Assistant.
+
+Question:
+{question}
+
+Detected Intent:
+{intent}
+
+Persona:
+{persona}
+
+Communication Style:
+{persona_guidance.get(persona)}
+
+Analyzed Data:
+{final_summary.to_string()}
+
+RAG Context:
+{raci_context}
+
+Instructions:
+- Analyze relationships across datasets
+- Use RACI docs when needed
+- Give natural business recommendations
+- Avoid repetitive templates
+"""
+
+        response = agent_llm.invoke(prompt)
+
+        return response.content
+
     except Exception as e:
-        st.warning(f"KPI calculation error: {e}")
-    
-    return kpis
+        return f"AI analysis failed: {str(e)}"
 
-# -------------------------------------------------------
-# STRICT TOOLS WITH DOCSTRINGS (FIXED)
-# -------------------------------------------------------
-
-class InitiativeInput(BaseModel):
-    name: str = Field(..., description="Initiative name to search")
-
-def get_initiative_status_func(name: str) -> list:
-    """Find initiatives matching the given name."""
-    results = []
-    for tname, df in normalized_dfs.items():
-        if "initiative" in tname:
-            for col in df.columns:
-                if "name" in col:
-                    matches = df[df[col].str.contains(name, case=False, na=False)]
-                    if not matches.empty:
-                        results.extend(matches.to_dict(orient="records"))
-    return results
-
-get_initiative_status = StructuredTool.from_function(
-    name="get_initiative_status",
-    description="Look up initiative details by name",
-    func=get_initiative_status_func,
-    args_schema=InitiativeInput,
-    strict=True
-)
-
-class RiskInput(BaseModel):
-    level: str = Field(..., description="Risk level: critical, high, medium, low")
-
-def get_risks_func(level: str) -> list:
-    """Get risks by severity level."""
-    results = []
-    for tname, df in normalized_dfs.items():
-        if "risk" in tname and "impact" in df.columns:
-            matches = df[df["impact"].str.lower() == level.lower()]
-            if not matches.empty:
-                results.extend(matches.to_dict(orient="records"))
-    return results
-
-get_risks_by_severity = StructuredTool.from_function(
-    name="get_risks_by_severity",
-    description="Get risks filtered by severity level",
-    func=get_risks_func,
-    args_schema=RiskInput,
-    strict=True
-)
-
-class RACIInput(BaseModel):
-    query: str = Field(..., description="Query for RACI document")
-
-def search_raci_func(query: str) -> str:
-    """Search RACI document for responsibilities."""
-    docs = retriever.invoke(query)
-    return "\n".join([d.page_content for d in docs[:3]])
-
-search_raci = StructuredTool.from_function(
-    name="search_raci",
-    description="Search RACI document for role responsibilities",
-    func=search_raci_func,
-    args_schema=RACIInput,
-    strict=True
-)
-
-# Cross-table analyzer
-class AnalyzeInput(BaseModel):
-    name: str = Field(..., description="Initiative name to analyze across tables")
-
-def analyze_initiative_func(name: str) -> dict:
-    """Analyze initiative across all related PMO datasets."""
-    result = {"initiative": [], "risks": [], "costs": [], "features": []}
-    
-    # Find initiative
-    for tname, df in normalized_dfs.items():
-        if "initiative" in tname:
-            for col in df.columns:
-                if "name" in col:
-                    matches = df[df[col].str.contains(name, case=False, na=False)]
-                    if not matches.empty:
-                        result["initiative"] = matches.to_dict(orient="records")
-                        
-                        # Auto-join with other tables using relationship graph
-                        if tname in relationship_graph:
-                            for related_table, rel_info in relationship_graph[tname]["related"].items():
-                                if rel_info["join_candidates"]:
-                                    join_key = rel_info["join_candidates"][0][0]  # Best join key
-                                    related_df = normalized_dfs[related_table]
-                                    
-                                    if join_key in related_df.columns:
-                                        for _, row in matches.iterrows():
-                                            key_val = row[join_key]
-                                            joined = related_df[related_df[join_key] == key_val]
-                                            
-                                            if "risk" in related_table:
-                                                result["risks"].extend(joined.to_dict(orient="records"))
-                                            elif "cost" in related_table:
-                                                result["costs"].extend(joined.to_dict(orient="records"))
-                                            elif "feature" in related_table:
-                                                result["features"].extend(joined.to_dict(orient="records"))
-                        break
-            if result["initiative"]:
-                break
-    
-    return result
-
-analyze_initiative = StructuredTool.from_function(
-    name="analyze_initiative",
-    description="Deep analyze initiative across risk, cost, and feature data",
-    func=analyze_initiative_func,
-    args_schema=AnalyzeInput,
-    strict=True
-)
-
-TOOLS = [get_initiative_status, get_risks_by_severity, search_raci, analyze_initiative]
-
-# -------------------------------------------------------
-# AGENT LLM (FIXED)
-# -------------------------------------------------------
-agent_llm = ChatOpenAI(
-    model="gpt-4o-mini",  # More reliable than gpt-4.1
-    temperature=0.4,
-    api_key=st.secrets["OPENAI_API_KEY"]
-).bind_tools(TOOLS)
-
-# -------------------------------------------------------
-# CHAT HISTORY (FIXED)
-# -------------------------------------------------------
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# -------------------------------------------------------
-# AGENT FUNCTION (FIXED MULTI-TOOL + SAFE LOOKUP)
-# -------------------------------------------------------
-def run_agent(question: str, persona: str) -> str:
-    """Run the PMO agent with multi-tool support."""
-    
-    # Lightweight relationship summary (not full graph)
-    relationship_summary = {k: list(v["related"].keys()) for k, v in relationship_graph.items()}
-    
-    system_prompt = f"""
-You are a PMO AI assistant for a {persona}.
 
-Available data relationships: {relationship_summary}
-
-Use tools when data lookup is needed. Answer clearly and concisely.
-"""
-    
-    result = agent_llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=question)
-    ])
-    
-    tool_calls = result.additional_kwargs.get("tool_calls", [])
-    
-    if tool_calls:
-        all_outputs = []
-        for call in tool_calls:
-            tool_name = call["function"]["name"]
-            args = call["function"]["arguments"]
-            
-            import json
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except:
-                    args = {}
-            
-            # SAFE TOOL LOOKUP (FIX)
-            tool_obj = next((t for t in TOOLS if t.name == tool_name), None)
-            if tool_obj is None:
-                all_outputs.append({"tool": tool_name, "output": "Invalid tool requested"})
-                continue
-                
-            try:
-                output = tool_obj.invoke(args)
-                all_outputs.append({"tool": tool_name, "output": output})
-            except Exception as e:
-                all_outputs.append({"tool": tool_name, "output": f"Error: {e}"})
-        
-        summary = agent_llm.invoke([
-            SystemMessage(content="Summarize these results clearly:"),
-            HumanMessage(content=str(all_outputs))
-        ])
-        return summary.content
-    
-    return result.content
-
-# -------------------------------------------------------
-# UI WITH TABS (IMPROVED UX)
-# -------------------------------------------------------
+# ---------------------------------------------------
+# UI
+# ---------------------------------------------------
 st.title("🤖 Enterprise PMO Assistant")
 
-# Persona selector
-persona = st.selectbox("Select Persona:", ["Director", "Project Manager", "CIO"])
+persona = st.selectbox(
+    "Select Persona",
+    ["Director", "Project Manager", "CIO"]
+)
 
-# TABS FOR BETTER UX
-tab1, tab2 = st.tabs(["📊 Dashboard", "💬 Chat Assistant"])
+tab1, tab2 = st.tabs([
+    "📊 Dashboard",
+    "💬 Chat Assistant"
+])
+
 
 with tab1:
-    st.subheader(f"{persona} Dashboard")
-    
-    # KPI Dashboard (FIXED CRASH)
-    kpis = get_persona_kpis(persona, normalized_dfs)
-    
-    if kpis:
-        cols = st.columns(len(kpis))
-        for i, (key, value) in enumerate(kpis.items()):
-            cols[i].metric(key.replace("_", " ").title(), value)
-    else:
-        st.info("No KPI data available for this persona.")
-    
-    # Visualizations
-    if normalized_dfs:
-        # Risk heatmap
-        for name, df in normalized_dfs.items():
-            if "risk" in name and "impact" in df.columns and "likelihood" in df.columns:
-                fig = px.density_heatmap(df, x="likelihood", y="impact", 
-                                       title="Risk Heatmap", color_continuous_scale="Reds")
-                st.plotly_chart(fig, use_container_width=True)
-                break
-        
-        # Budget overview
-        for name, df in normalized_dfs.items():
-            if "cost" in name and "actual_cost_usd" in df.columns:
-                if "planned_budget_usd" in df.columns:
-                    budget_data = pd.DataFrame({
-                        "Type": ["Planned", "Actual"],
-                        "Amount": [df["planned_budget_usd"].sum(), df["actual_cost_usd"].sum()]
-                    })
-                    fig = px.bar(budget_data, x="Type", y="Amount", title="Budget vs Actual")
-                    st.plotly_chart(fig, use_container_width=True)
-                break
+    if persona == "Director":
+        show_director_dashboard()
+
+    elif persona == "Project Manager":
+        show_pm_dashboard()
+
+    elif persona == "CIO":
+        show_cio_dashboard()
+
 
 with tab2:
-    st.subheader("💬 PMO Chat Assistant")
-    
-    # Chat history display
-    for turn in st.session_state.chat_history:
+    st.subheader("PMO Chat Assistant")
+
+    for chat in st.session_state.chat_history:
         with st.chat_message("user"):
-            st.write(turn["user"])
+            st.write(chat["user"])
+
         with st.chat_message("assistant"):
-            st.write(turn["assistant"])
-    
-    # CHAT INPUT (BETTER UX)
-    question = st.chat_input("Ask about risks, costs, initiatives, or governance...")
-    
+            st.write(chat["assistant"])
+
+    question = st.chat_input(
+        "Ask project, risk, budget or delivery questions..."
+    )
+
     if question:
-        with st.spinner("Analyzing..."):
-            answer = run_agent(question, persona)
-        
-        # Save to history
+        with st.spinner("Analyzing project portfolio..."):
+            answer = run_agent(
+                question,
+                persona
+            )
+
         st.session_state.chat_history.append({
             "user": question,
             "assistant": answer
         })
-        
-        # Display new answer
-        with st.chat_message("user"):
-            st.write(question)
-        with st.chat_message("assistant"):
-            st.write(answer)
-        
-        st.rerun()
+
+        st.rerun() 
