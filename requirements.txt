@@ -1,11 +1,11 @@
 streamlit
 pandas
-langchain
-langchain-openai
-langchain-community
-langchain-experimental
 faiss-cpu
 pypdf
 tiktoken
 numpy
 python-dotenv
+langchain==0.1.14
+langchain-community==0.0.28
+langchain-openai==0.0.6
+langchain-experimental==0.0.52
