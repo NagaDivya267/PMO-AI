@@ -1037,13 +1037,20 @@ with tab2:
         for alert in alerts:
             if "🔴" in alert:
                 st.error(alert)
+
             elif "🟡" in alert:
                 st.warning(alert)
+
             else:
                 st.success(alert)
 
     st.subheader("PMO Chat Assistant")
 
+    # Initialize session history
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Display chat history
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
             st.write(chat["user"])
@@ -1052,16 +1059,23 @@ with tab2:
             st.write(chat["assistant"])
 
     question = st.chat_input(
-        "Ask project, risk, budget or delivery questions..."
+        "Ask project, budget, risk or delivery questions..."
     )
 
     if question:
+        with st.chat_message("user"):
+            st.write(question)
+
         with st.spinner("Analyzing portfolio..."):
-            answer = run_agent(question, persona)
+            answer = run_agent(
+                question,
+                persona
+            )
+
+        with st.chat_message("assistant"):
+            st.write(answer)
 
         st.session_state.chat_history.append({
             "user": question,
             "assistant": answer
         })
-
-        st.rerun()
