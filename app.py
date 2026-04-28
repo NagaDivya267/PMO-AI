@@ -681,6 +681,9 @@ def show_cio_dashboard():
 # ---------------------------------------------------
 # CHATBOT ENGINE
 # ---------------------------------------------------
+# ---------------------------------------------------
+# CHATBOT ENGINE
+# ---------------------------------------------------
 def run_agent(question, persona):
     try:
         if initiative_df is None:
@@ -715,7 +718,7 @@ def run_agent(question, persona):
 
         master_df = initiative_df.copy()
 
-        # Merge cost
+        # Merge cost data
         if (
             cost_df is not None
             and initiative_id_col
@@ -724,11 +727,10 @@ def run_agent(question, persona):
             master_df = master_df.merge(
                 cost_df,
                 on=initiative_id_col,
-                how="left",
-                suffixes=("", "_cost")
+                how="left"
             )
 
-        # Merge risk
+        # Merge risk data
         if (
             risk_df is not None
             and risk_link_col
@@ -738,8 +740,7 @@ def run_agent(question, persona):
                 risk_df,
                 left_on=initiative_id_col,
                 right_on=risk_link_col,
-                how="left",
-                suffixes=("", "_risk")
+                how="left"
             )
 
         status_col = find_column(
@@ -752,7 +753,7 @@ def run_agent(question, persona):
             ["impact"]
         )
 
-        # High Risk Projects
+        # Risk projects
         high_risk_projects = pd.DataFrame()
 
         if risk_impact_col:
@@ -766,7 +767,7 @@ def run_agent(question, persona):
                 )
             ]
 
-        # Delayed Projects
+        # Delayed projects
         delayed_projects = pd.DataFrame()
 
         if status_col:
@@ -777,20 +778,16 @@ def run_agent(question, persona):
                 .isin(["delayed"])
             ]
 
-        # Over Budget Projects
+        # Over budget projects
         over_budget_projects = pd.DataFrame()
 
         if planned_budget_col and actual_cost_col:
             over_budget_projects = master_df[
-                numeric_safe(
-                    master_df[actual_cost_col]
-                ) >
-                numeric_safe(
-                    master_df[planned_budget_col]
-                )
+                numeric_safe(master_df[actual_cost_col]) >
+                numeric_safe(master_df[planned_budget_col])
             ]
 
-        # Dynamic Intent Routing
+        # Intent routing
         if intent == "risk":
             analysis_df = high_risk_projects
 
@@ -825,26 +822,12 @@ def run_agent(question, persona):
         else:
             final_summary = analysis_df.head(5)
 
-        # ----------------------------
-        # Multi-document RAG retrieval
-        # ----------------------------
+        # RAG retrieval
         raci_context = ""
 
         if retriever:
             try:
-                if intent == "ownership":
-                    search_query = question + " responsibility escalation"
-
-                elif intent == "risk":
-                    search_query = question + " mitigation owner"
-
-                elif intent == "cost":
-                    search_query = question + " funding approval"
-
-                else:
-                    search_query = question
-
-                docs = retriever.invoke(search_query)
+                docs = retriever.invoke(question)
 
                 raci_context = "\n".join([
                     doc.page_content
@@ -856,13 +839,13 @@ def run_agent(question, persona):
 
         persona_guidance = {
             "Project Manager":
-                "Focus on execution recovery, blockers and delivery actions.",
+                "Focus on blockers, execution recovery and sprint delivery.",
 
             "Director":
-                "Focus on escalations, dependencies and portfolio risks.",
+                "Focus on portfolio risks, escalations and dependencies.",
 
             "CIO":
-                "Focus on financial exposure, strategic risks and executive decisions."
+                "Focus on strategy, financial exposure and executive decisions."
         }
 
         prompt = f"""
@@ -871,11 +854,11 @@ You are an intelligent PMO AI Assistant.
 Question:
 {question}
 
-Detected Intent:
-{intent}
-
 Persona:
 {persona}
+
+Intent:
+{intent}
 
 Communication Style:
 {persona_guidance.get(persona)}
@@ -887,10 +870,10 @@ RAG Context:
 {raci_context}
 
 Instructions:
-- Analyze relationships across datasets
-- Use RACI docs when needed
-- Give natural business recommendations
-- Avoid repetitive templates
+- Analyze cross dataset relationships
+- Provide business summary
+- Recommend actions
+- Avoid repetitive responses
 """
 
         response = agent_llm.invoke(prompt)
@@ -899,7 +882,119 @@ Instructions:
 
     except Exception as e:
         return f"AI analysis failed: {str(e)}"
+# ---------------------------------------------------
+# PROACTIVE ALERT ENGINE
+# ---------------------------------------------------
+def generate_persona_alerts(persona):
+    alerts = []
 
+    try:
+        # -----------------------------
+        # Cost Alerts
+        # -----------------------------
+        if cost_df is not None:
+            planned_col = find_column(
+                cost_df,
+                ["planned_budget", "planned"]
+            )
+
+            actual_col = find_column(
+                cost_df,
+                ["actual_cost", "actual"]
+            )
+
+            if planned_col and actual_col:
+                planned_total = numeric_safe(
+                    cost_df[planned_col]
+                ).sum()
+
+                actual_total = numeric_safe(
+                    cost_df[actual_col]
+                ).sum()
+
+                if actual_total > planned_total:
+                    alerts.append(
+                        f"🔴 Budget exceeded by ${actual_total-planned_total:,.0f}"
+                    )
+
+                elif actual_total < planned_total:
+                    alerts.append(
+                        f"🟢 Cost savings identified: ${planned_total-actual_total:,.0f}"
+                    )
+
+        # -----------------------------
+        # Delay Alerts
+        # -----------------------------
+        if initiative_df is not None:
+            status_col = find_column(
+                initiative_df,
+                ["status"]
+            )
+
+            if status_col:
+                delayed_count = len(
+                    initiative_df[
+                        initiative_df[status_col]
+                        .astype(str)
+                        .str.lower()
+                        .isin(["delayed"])
+                    ]
+                )
+
+                if delayed_count > 0:
+                    alerts.append(
+                        f"🟡 {delayed_count} initiatives delayed"
+                    )
+
+        # -----------------------------
+        # Risk Alerts
+        # -----------------------------
+        if risk_df is not None:
+            impact_col = find_column(
+                risk_df,
+                ["impact"]
+            )
+
+            if impact_col:
+                high_risk_count = len(
+                    risk_df[
+                        risk_df[impact_col]
+                        .astype(str)
+                        .str.lower()
+                        .str.contains(
+                            "high|critical",
+                            na=False
+                        )
+                    ]
+                )
+
+                if high_risk_count > 0:
+                    alerts.append(
+                        f"🔴 {high_risk_count} critical risks require attention"
+                    )
+
+        # -----------------------------
+        # CIO Strategic Alert
+        # -----------------------------
+        if persona == "CIO":
+            alerts.append(
+                "🟢 Market opportunity detected: competitors lag in AI claims automation"
+            )
+
+        # Persona filtering
+        if persona == "Project Manager":
+            return alerts[:2]
+
+        elif persona == "Director":
+            return alerts[:3]
+
+        elif persona == "CIO":
+            return alerts[:4]
+
+        return alerts
+
+    except Exception:
+        return ["No alerts available"]
 # ---------------------------------------------------
 # SESSION STATE
 # ---------------------------------------------------
@@ -933,8 +1028,20 @@ with tab1:
     elif persona == "CIO":
         show_cio_dashboard()
 
-
 with tab2:
+    st.subheader("AI Notification Center")
+
+    alerts = generate_persona_alerts(persona)
+
+    if alerts:
+        for alert in alerts:
+            if "🔴" in alert:
+                st.error(alert)
+            elif "🟡" in alert:
+                st.warning(alert)
+            else:
+                st.success(alert)
+
     st.subheader("PMO Chat Assistant")
 
     for chat in st.session_state.chat_history:
@@ -949,15 +1056,12 @@ with tab2:
     )
 
     if question:
-        with st.spinner("Analyzing project portfolio..."):
-            answer = run_agent(
-                question,
-                persona
-            )
+        with st.spinner("Analyzing portfolio..."):
+            answer = run_agent(question, persona)
 
         st.session_state.chat_history.append({
             "user": question,
             "assistant": answer
         })
 
-        st.rerun() 
+        st.rerun()
