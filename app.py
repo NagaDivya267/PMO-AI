@@ -1007,10 +1007,35 @@ if "chat_history" not in st.session_state:
 # ---------------------------------------------------
 st.title("🤖 Enterprise PMO Assistant")
 
-persona = st.selectbox(
-    "Select Persona",
-    ["Director", "Project Manager", "CIO"]
-)
+# ---------------------------------------------------
+# SIMULATED LOGIN + DEMO ROLE SWITCH
+# ---------------------------------------------------
+
+st.sidebar.subheader("User Context")
+
+# Simulated logged-in user
+user_email = "divya@company.com"
+
+# Default role (from login system in real world)
+default_role = "Director"
+
+# Demo mode toggle
+demo_mode = st.sidebar.checkbox("Enable Demo Role Switch", value=True)
+
+if demo_mode:
+    persona = st.sidebar.selectbox(
+        "Switch Role (Demo Mode)",
+        ["Director", "Project Manager", "CIO"],
+        index=0
+    )
+else:
+    persona = default_role
+
+# Display login info in main UI
+st.markdown(f"""
+### 👤 Logged in as: {user_email}  
+**Role:** {persona}
+""")
 
 tab1, tab2 = st.tabs([
     "📊 Dashboard",
