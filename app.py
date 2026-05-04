@@ -10,6 +10,7 @@ from langchain_community.document_loaders import PyPDFLoader
 # CONVERSATION MEMORY
 # -----------------------------
 
+
 # ---------------------------------------------------
 # PAGE CONFIG
 # ---------------------------------------------------
@@ -18,10 +19,13 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide"
 )
+
+# -----------------------------
+# CONVERSATION MEMORY INIT
+# -----------------------------
 if "memory" not in st.session_state:
     st.session_state.memory = {
         "last_entities": [],
-        "last_intent": "",
         "last_question": "",
         "last_answer": ""
     }
@@ -761,12 +765,10 @@ def run_agent(question, persona):
         # FOLLOW-UP UNDERSTANDING
         # -----------------------------
         question_lower = question.lower()
-
         follow_up_words = ["these", "those", "them", "it", "this"]
 
         is_follow_up = any(word in question_lower for word in follow_up_words)
 
-        # If follow-up → inject previous entities
         if is_follow_up and memory["last_entities"]:
             entity_text = ", ".join(memory["last_entities"])
             question = f"{question} (referring to: {entity_text})"
@@ -794,7 +796,7 @@ def run_agent(question, persona):
             try:
                 docs = retriever.invoke(question)
                 rag_context = "\n".join([d.page_content for d in docs[:3]])
-            except:
+            except Exception:
                 pass
 
         # -----------------------------
@@ -807,7 +809,35 @@ def run_agent(question, persona):
         }
 
         # -----------------------------
-        # 🔥 LLM PROMPT (CONVERSATIONAL)
+        # STYLE DETECTION (LLM-DRIVEN)
+        # -----------------------------
+        style_prompt = f"""
+Classify the user's request into one of these categories:
+
+- brief → short answer (4–6 lines)
+- detailed → structured answer with insights
+- normal → balanced answer
+
+User question:
+{question}
+
+Only return ONE word: brief OR detailed OR normal
+"""
+
+        try:
+            style_response = agent_llm.invoke(style_prompt).content.strip().lower()
+        except Exception:
+            style_response = "normal"
+
+        if "brief" in style_response:
+            response_style = "brief"
+        elif "detailed" in style_response:
+            response_style = "detailed"
+        else:
+            response_style = "normal"
+
+        # -----------------------------
+        # MAIN PROMPT
         # -----------------------------
         prompt = f"""
 You are an intelligent conversational PMO AI Assistant.
@@ -816,15 +846,17 @@ User Question:
 {question}
 
 Previous Context:
-Last Question: {memory["last_question"]}
-Last Answer: {memory["last_answer"]}
-Last Entities: {memory["last_entities"]}
+Last Question: {memory.get("last_question", "")}
+Last Answer: {memory.get("last_answer", "")}
+Last Entities: {memory.get("last_entities", [])}
 
 Persona:
 {persona}
 
 Communication Style:
 {persona_style.get(persona)}
+
+Response Style: {response_style}
 
 Available Data:
 Initiatives:
@@ -840,31 +872,58 @@ Documents:
 {rag_context}
 
 Instructions:
+
 - Understand if this is a follow-up question
 - If follow-up → use previous entities and context
-- Always refer to real project names from data
-- Never say Project A or Project B
-- Answer should include:
-    1. Direct Answer
-    2. Key Insights
-    3. Recommended Actions
-- Keep it clear and contextual
+- Always use real project names (never Project A/B)
+
+STYLE RULES:
+
+If Response Style = brief:
+→ Answer in 4–6 lines ONLY
+→ No headings
+→ No bullet points
+→ No detailed breakdown
+
+If Response Style = detailed:
+→ Use structure:
+   1. Direct Answer
+   2. Key Insights
+   3. Recommended Actions
+
+If Response Style = normal:
+→ Give concise explanation (not too long, not too short)
+
+- Avoid repeating the same content
+- Keep response relevant and contextual
 """
 
+        # -----------------------------
+        # LLM CALL
+        # -----------------------------
         response = agent_llm.invoke(prompt)
         answer = response.content
 
         # -----------------------------
-        # 🔥 UPDATE MEMORY
+        # UPDATE MEMORY
         # -----------------------------
         try:
-            # Extract entities from data (simple version)
-            name_col = find_column(filtered_initiative_df, ["initiative_name", "summary", "name"])
+            name_col = find_column(
+                filtered_initiative_df,
+                ["initiative_name", "summary", "name"]
+            )
 
             if name_col:
-                entities = filtered_initiative_df[name_col].dropna().astype(str).unique().tolist()
+                entities = (
+                    filtered_initiative_df[name_col]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
                 memory["last_entities"] = entities[:5]
-        except:
+
+        except Exception:
             pass
 
         memory["last_question"] = question
@@ -873,7 +932,7 @@ Instructions:
         return answer
 
     except Exception as e:
-        return f"AI analysis failed: {str(e)}"   
+        return f"AI analysis failed: {str(e)}"
 # ---------------------------------------------------
 # PROACTIVE ALERT ENGINE
 # ---------------------------------------------------
