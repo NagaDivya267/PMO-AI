@@ -180,45 +180,61 @@ relationship_graph = detect_relationships(normalized_dfs)
 
 
 # ---------------------------------------------------
-# VECTOR STORE
+# API KEY CHECK
+# ---------------------------------------------------
+def get_api_key():
+    """Safely get API key — returns None if missing or placeholder."""
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", "")
+        if key and not key.startswith("sk-placeholder"):
+            return key
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------
+# VECTOR STORE (LAZY — only built on first chat use)
 # ---------------------------------------------------
 @st.cache_resource
-def load_vectorstore():
-    if not docs:
+def load_vectorstore(_api_key):
+    if not docs or not _api_key:
         return None
 
     try:
-        embeddings = OpenAIEmbeddings(
-            api_key=st.secrets["OPENAI_API_KEY"]
-        )
-
-        vectorstore = FAISS.from_documents(
-            docs,
-            embeddings
-        )
-
+        embeddings = OpenAIEmbeddings(api_key=_api_key)
+        vectorstore = FAISS.from_documents(docs, embeddings)
         return vectorstore.as_retriever()
-
     except Exception:
         return None
 
 
-retriever = load_vectorstore()
+def get_retriever():
+    """Lazy retriever — only initializes when called."""
+    api_key = get_api_key()
+    if not api_key:
+        return None
+    return load_vectorstore(api_key)
 
 
 # ---------------------------------------------------
-# LLM
+# LLM (LAZY — only created on first chat use)
 # ---------------------------------------------------
 @st.cache_resource
-def load_llm():
+def load_llm(_api_key):
     return ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.3,
-        api_key=st.secrets["OPENAI_API_KEY"]
+        api_key=_api_key
     )
 
 
-agent_llm = load_llm()
+def get_llm():
+    """Lazy LLM — only initializes when called."""
+    api_key = get_api_key()
+    if not api_key:
+        return None
+    return load_llm(api_key)
 
 
 # ---------------------------------------------------
@@ -332,7 +348,10 @@ Current question: {question}
 Return ONLY the category name, nothing else."""
 
     try:
-        response = agent_llm.invoke(prompt)
+        llm = get_llm()
+        if not llm:
+            return "portfolio"
+        response = llm.invoke(prompt)
         return response.content.strip().lower()
     except Exception:
         return "portfolio"
@@ -883,6 +902,7 @@ def run_agent(question, persona, chat_history=None):
         # RAG CONTEXT (your documents)
         # -----------------------------
         rag_context = ""
+        retriever = get_retriever()
 
         if retriever:
             try:
@@ -894,6 +914,10 @@ def run_agent(question, persona, chat_history=None):
         # -----------------------------
         # BUILD CONVERSATIONAL MESSAGE CHAIN
         # -----------------------------
+        llm = get_llm()
+        if not llm:
+            return "⚠️ OpenAI API key not configured. Please add OPENAI_API_KEY to .streamlit/secrets.toml"
+
         messages = [
             SystemMessage(content=build_system_prompt(persona))
         ]
@@ -924,7 +948,7 @@ names and IDs from the data.
 """
         messages.append(HumanMessage(content=user_content))
 
-        response = agent_llm.invoke(messages)
+        response = llm.invoke(messages)
 
         return response.content
 
