@@ -1029,24 +1029,57 @@ with tab1:
         show_cio_dashboard()
 
 with tab2:
+    st.subheader("Alert Automation")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if st.button("⏰ Schedule Daily Alerts"):
+            st.success("Alerts scheduled daily at 9:00 AM for selected persona")
+
+    with c2:
+        run_now = st.button("▶ Run Alerts Now")
+
+    # -----------------------------
+    # ALERTS SECTION
+    # -----------------------------
     st.subheader("AI Notification Center")
 
-    alerts = generate_persona_alerts(persona)
+    if run_now:
+        alerts = generate_persona_alerts(persona)
+    else:
+        alerts = []
 
     if alerts:
         for alert in alerts:
             if "🔴" in alert:
                 st.error(alert)
-
             elif "🟡" in alert:
                 st.warning(alert)
-
             else:
                 st.success(alert)
 
+        # Simulated delivery
+        st.markdown("### Alert Delivery")
+
+        if persona == "Project Manager":
+            st.write("📩 Sent via Teams to Project Manager")
+
+        elif persona == "Director":
+            st.write("📩 Sent via Email to Director")
+
+        elif persona == "CIO":
+            st.write("📩 Sent via Executive Dashboard Notification")
+
+    else:
+        st.info("No alerts triggered. Click 'Run Alerts Now' to simulate.")
+
+    # -----------------------------
+    # CHAT SECTION
+    # -----------------------------
     st.subheader("PMO Chat Assistant")
 
-    # Initialize session history
+    # Initialize session
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -1054,7 +1087,6 @@ with tab2:
     for chat in st.session_state.chat_history:
         with st.chat_message("user"):
             st.write(chat["user"])
-
         with st.chat_message("assistant"):
             st.write(chat["assistant"])
 
@@ -1067,10 +1099,7 @@ with tab2:
             st.write(question)
 
         with st.spinner("Analyzing portfolio..."):
-            answer = run_agent(
-                question,
-                persona
-            )
+            answer = run_agent(question, persona)
 
         with st.chat_message("assistant"):
             st.write(answer)
