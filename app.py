@@ -93,10 +93,7 @@ risk_df = None
 for name, df in normalized_dfs.items():
     lower_name = name.lower()
 
-    if any(k in lower_name for k in ["initiative", "project"]):
-        initiative_df = df
-
-    elif any(k in lower_name for k in ["feature", "story"]):
+    if any(k in lower_name for k in ["feature", "story"]):
         feature_df = df
 
     elif "epic" in lower_name:
@@ -107,6 +104,9 @@ for name, df in normalized_dfs.items():
 
     elif "risk" in lower_name:
         risk_df = df
+
+    elif any(k in lower_name for k in ["initiative", "project"]):
+        initiative_df = df
 
 
 # 🔥 FALLBACK FIX (IMPORTANT)
@@ -306,34 +306,30 @@ def apply_role_filter(persona):
 def classify_user_intent(question, chat_history=None):
     history_block = ""
     if chat_history:
-        recent = chat_history[-6:]
+        recent = chat_history[-4:]
         lines = []
         for msg in recent:
             lines.append(f"User: {msg['user']}")
-            lines.append(f"Assistant: {msg['assistant'][:200]}")
+            lines.append(f"Assistant: {msg['assistant'][:300]}")
         history_block = "\n".join(lines)
 
-    prompt = f"""
-    Classify this PMO question into ONE category.
-    Use the conversation history to resolve pronouns and references
-    (e.g. "these", "that project", "tell me more").
+    prompt = f"""Classify this PMO question into ONE category.
+Use conversation history to understand follow-up context.
 
-    Categories:
-    - cost
-    - risk
-    - schedule
-    - ownership
-    - portfolio
-    - delivery
+Categories:
+- cost (budget, spending, CPI, cost variance, over budget)
+- risk (risks, impact, probability, mitigation)
+- schedule (SPI, delays, timeline, completion, progress)
+- ownership (RACI, who is responsible, accountability)
+- portfolio (overall status, multiple projects overview)
+- delivery (blockers, epic progress, sprint, velocity)
 
-    Conversation history:
-    {history_block}
+Conversation history:
+{history_block}
 
-    Current question:
-    {question}
+Current question: {question}
 
-    Return only category name.
-    """
+Return ONLY the category name, nothing else."""
 
     try:
         response = agent_llm.invoke(prompt)
@@ -774,26 +770,103 @@ def build_system_prompt(persona):
 Persona: {persona}
 Communication Style: {PERSONA_STYLE.get(persona, "")}
 
-Core rules:
-- You have full memory of the conversation. Use prior messages to resolve
-  references like "these projects", "that initiative", "tell me more",
-  "what about SPI for those", etc.
-- When the user asks a follow-up, do NOT repeat information already given.
-  Build on the previous answer instead.
-- Understand the question deeply (DO NOT rely on keywords only).
-- Identify if the user is asking about a specific project, portfolio, cost,
-  risk, or schedule.
-- If a project name is mentioned → ONLY answer for that project.
-- If no project is mentioned → give top relevant insights.
-- Always use actual project/initiative names from the data.
-- NEVER say "Project A" or "Project B".
-- Provide:
-    1. Direct Answer
-    2. Key Insights
-    3. Recommended Actions
-- Use markdown formatting for readability (headers, bullets, bold).
-- Keep response clear and professional.
+CRITICAL RULES — FOLLOW EXACTLY:
+
+1. ANSWER WHAT THE USER ASKED — not what you think they should know.
+   Read the question carefully. If they ask for SPI, give SPI. If they ask
+   about 2 specific initiatives, answer ONLY for those 2.
+
+2. USE CONVERSATION HISTORY — resolve pronouns and references:
+   - "these" / "those" / "them" = initiatives mentioned in your last answer
+   - "tell me more" = expand on the same topic
+   - "what about risks for those?" = risks for previously discussed items
+
+3. USE ONLY REAL DATA — never invent numbers. Pull values directly from
+   the data tables provided. Show your calculation when computing metrics
+   like SPI, CPI, variance, etc.
+
+4. FORMULAS (use these exactly):
+   - SPI = Completion_Percentage / Planned_Completion_Percentage
+   - CPI = Planned_Budget_USD / Actual_Cost_USD
+   - Budget Variance = Planned_Budget_USD - Actual_Cost_USD
+
+5. STRUCTURE your response as:
+   - **Direct Answer:** (answer the exact question first)
+   - **Key Insights:** (additional relevant context)
+   - **Recommended Actions:** (1-3 actionable next steps)
+
+6. NEVER say "Project A" or "Project B" — use real initiative names and IDs.
+
+7. DO NOT repeat information already given in prior messages.
+
+8. Use markdown formatting (headers, bullets, bold) for readability.
 """
+
+
+def clean_dataframe(df, max_cols=15):
+    """Remove unnamed/empty columns and limit column count for LLM context."""
+    if df is None:
+        return None
+    cleaned = df.copy()
+    unnamed_cols = [c for c in cleaned.columns if "unnamed" in str(c).lower()]
+    if unnamed_cols:
+        cleaned = cleaned.drop(columns=unnamed_cols)
+    cleaned = cleaned.dropna(axis=1, how="all")
+    if len(cleaned.columns) > max_cols:
+        cleaned = cleaned.iloc[:, :max_cols]
+    return cleaned
+
+
+def build_merged_context():
+    """Build clean, merged data context for the LLM."""
+    if filtered_initiative_df is None:
+        return "No initiative data.", "", ""
+
+    clean_init = clean_dataframe(filtered_initiative_df)
+
+    init_id_col = find_column(clean_init, ["initiative_id", "issue_key", "id"])
+
+    merged = clean_init.copy()
+
+    if filtered_cost_df is not None and init_id_col:
+        clean_cost = clean_dataframe(filtered_cost_df)
+        cost_id_col = find_column(clean_cost, ["initiative_id", "id"])
+
+        if cost_id_col:
+            try:
+                cost_cols_to_use = [cost_id_col]
+                for c in clean_cost.columns:
+                    if c != cost_id_col and c not in merged.columns:
+                        cost_cols_to_use.append(c)
+
+                merged = merged.merge(
+                    clean_cost[cost_cols_to_use],
+                    left_on=init_id_col,
+                    right_on=cost_id_col,
+                    how="left"
+                )
+            except Exception:
+                pass
+
+    merged = merged.dropna(how="all")
+    merged_context = merged.head(20).to_string(index=False)
+
+    if merged_context.count("NaN") > 50:
+        init_context = clean_init.head(20).to_string(index=False)
+        cost_context = ""
+        if filtered_cost_df is not None:
+            cost_context = clean_dataframe(filtered_cost_df).head(10).to_string(index=False)
+        merged_context = f"Initiatives:\n{init_context}\n\nCost Data:\n{cost_context}"
+
+    risk_context = ""
+    if filtered_risk_df is not None:
+        risk_context = clean_dataframe(filtered_risk_df).head(15).to_string(index=False)
+
+    epic_context = ""
+    if filtered_epic_df is not None:
+        epic_context = clean_dataframe(filtered_epic_df).head(15).to_string(index=False)
+
+    return merged_context, risk_context, epic_context
 
 
 def run_agent(question, persona, chat_history=None):
@@ -802,27 +875,9 @@ def run_agent(question, persona, chat_history=None):
             return "No initiative dataset found."
 
         # -----------------------------
-        # PREPARE DATA FOR LLM
+        # BUILD MERGED DATA CONTEXT
         # -----------------------------
-        data_context = ""
-
-        try:
-            sample_data = filtered_initiative_df.head(20)
-            data_context = sample_data.to_string(index=False)
-        except Exception:
-            data_context = "No structured data available."
-
-        # -----------------------------
-        # OPTIONAL: Add cost + risk
-        # -----------------------------
-        cost_context = ""
-        risk_context = ""
-
-        if filtered_cost_df is not None:
-            cost_context = filtered_cost_df.head(10).to_string(index=False)
-
-        if filtered_risk_df is not None:
-            risk_context = filtered_risk_df.head(10).to_string(index=False)
+        merged_context, risk_context, epic_context = build_merged_context()
 
         # -----------------------------
         # RAG CONTEXT (your documents)
@@ -850,18 +905,22 @@ def run_agent(question, persona, chat_history=None):
 
         user_content = f"""{question}
 
---- Available Data ---
-Initiatives:
-{data_context}
+--- Portfolio Data (Initiatives + Cost merged) ---
+{merged_context}
 
-Cost Data:
-{cost_context if cost_context else "No cost data available."}
-
-Risk Data:
+--- Risk Register ---
 {risk_context if risk_context else "No risk data available."}
 
-RACI / Documents:
+--- Epics ---
+{epic_context if epic_context else "No epic data available."}
+
+--- RACI / Documents ---
 {rag_context if rag_context else "No RACI document context available."}
+
+IMPORTANT: Use the data above to answer precisely. For SPI calculations,
+use: SPI = Actual_Completion / Planned_Completion (from the merged data).
+For CPI: CPI = Planned_Budget / Actual_Cost. Always reference real initiative
+names and IDs from the data.
 """
         messages.append(HumanMessage(content=user_content))
 
