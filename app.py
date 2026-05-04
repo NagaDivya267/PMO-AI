@@ -6,7 +6,9 @@ import plotly.express as px
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
-
+# -----------------------------
+# CONVERSATION MEMORY
+# -----------------------------
 
 # ---------------------------------------------------
 # PAGE CONFIG
@@ -16,7 +18,13 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide"
 )
-
+if "memory" not in st.session_state:
+    st.session_state.memory = {
+        "last_entities": [],
+        "last_intent": "",
+        "last_question": "",
+        "last_answer": ""
+    }
 
 # ---------------------------------------------------
 # LOAD DATA
@@ -747,23 +755,27 @@ def run_agent(question, persona):
         if filtered_initiative_df is None:
             return "No initiative dataset found."
 
-        # -----------------------------
-        # PREPARE DATA FOR LLM
-        # -----------------------------
-        data_context = ""
-
-        try:
-            # Keep it small (top 20 rows only)
-            sample_data = filtered_initiative_df.head(20)
-
-            data_context = sample_data.to_string(index=False)
-
-        except Exception:
-            data_context = "No structured data available."
+        memory = st.session_state.memory
 
         # -----------------------------
-        # OPTIONAL: Add cost + risk
+        # FOLLOW-UP UNDERSTANDING
         # -----------------------------
+        question_lower = question.lower()
+
+        follow_up_words = ["these", "those", "them", "it", "this"]
+
+        is_follow_up = any(word in question_lower for word in follow_up_words)
+
+        # If follow-up → inject previous entities
+        if is_follow_up and memory["last_entities"]:
+            entity_text = ", ".join(memory["last_entities"])
+            question = f"{question} (referring to: {entity_text})"
+
+        # -----------------------------
+        # PREPARE DATA CONTEXT
+        # -----------------------------
+        data_context = filtered_initiative_df.head(20).to_string(index=False)
+
         cost_context = ""
         risk_context = ""
 
@@ -774,7 +786,7 @@ def run_agent(question, persona):
             risk_context = filtered_risk_df.head(10).to_string(index=False)
 
         # -----------------------------
-        # RAG CONTEXT (your documents)
+        # RAG CONTEXT
         # -----------------------------
         rag_context = ""
 
@@ -789,21 +801,26 @@ def run_agent(question, persona):
         # PERSONA STYLE
         # -----------------------------
         persona_style = {
-            "Project Manager": "Focus on execution, blockers, and delivery.",
-            "Director": "Focus on risks, dependencies, and escalations.",
-            "CIO": "Focus on strategy, financial impact, and decisions."
+            "Project Manager": "Focus on execution, blockers, delivery.",
+            "Director": "Focus on risks, dependencies, escalations.",
+            "CIO": "Focus on strategy, financial impact, decisions."
         }
 
         # -----------------------------
-        # 🔥 FULL LLM CONTROL PROMPT
+        # 🔥 LLM PROMPT (CONVERSATIONAL)
         # -----------------------------
         prompt = f"""
-You are an intelligent PMO AI Assistant.
+You are an intelligent conversational PMO AI Assistant.
 
 User Question:
 {question}
 
-User Persona:
+Previous Context:
+Last Question: {memory["last_question"]}
+Last Answer: {memory["last_answer"]}
+Last Entities: {memory["last_entities"]}
+
+Persona:
 {persona}
 
 Communication Style:
@@ -813,37 +830,47 @@ Available Data:
 Initiatives:
 {data_context}
 
-Cost Data:
+Cost:
 {cost_context}
 
-Risk Data:
+Risk:
 {risk_context}
 
-RACI / Documents:
+Documents:
 {rag_context}
 
 Instructions:
-- Understand the question deeply (DO NOT rely on keywords only)
-- Identify if the user is asking about:
-    - specific project
-    - portfolio
-    - cost
-    - risk
-    - schedule
-- If a project name is mentioned → ONLY answer for that project
-- If no project is mentioned → give top relevant insights
-- Always use actual project/initiative names from the data
-- NEVER say "Project A" or "Project B"
-- Provide:
+- Understand if this is a follow-up question
+- If follow-up → use previous entities and context
+- Always refer to real project names from data
+- Never say Project A or Project B
+- Answer should include:
     1. Direct Answer
     2. Key Insights
     3. Recommended Actions
-- Keep response clear and professional
+- Keep it clear and contextual
 """
 
         response = agent_llm.invoke(prompt)
+        answer = response.content
 
-        return response.content
+        # -----------------------------
+        # 🔥 UPDATE MEMORY
+        # -----------------------------
+        try:
+            # Extract entities from data (simple version)
+            name_col = find_column(filtered_initiative_df, ["initiative_name", "summary", "name"])
+
+            if name_col:
+                entities = filtered_initiative_df[name_col].dropna().astype(str).unique().tolist()
+                memory["last_entities"] = entities[:5]
+        except:
+            pass
+
+        memory["last_question"] = question
+        memory["last_answer"] = answer
+
+        return answer
 
     except Exception as e:
         return f"AI analysis failed: {str(e)}"   
