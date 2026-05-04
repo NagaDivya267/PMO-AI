@@ -239,6 +239,68 @@ def find_column(df, possible_cols):
 
     return None
 # ---------------------------------------------------
+# ROLE BASED DATA FILTER
+# ---------------------------------------------------
+def apply_role_filter(persona):
+    filtered = {}
+
+    try:
+        # -----------------------------
+        # INITIATIVE FILTER
+        # -----------------------------
+        if initiative_df is not None:
+            df = initiative_df.copy()
+
+            owner_col = find_column(df, ["owner", "assignee"])
+            dept_col = find_column(df, ["department", "domain"])
+
+            if persona == "Project Manager":
+                if owner_col:
+                    filtered["initiative"] = df[
+                        df[owner_col].astype(str).str.contains("pm", case=False, na=False)
+                    ]
+                else:
+                    filtered["initiative"] = df.head(3)
+
+            elif persona == "Director":
+                if dept_col:
+                    filtered["initiative"] = df[
+                        df[dept_col].astype(str).str.contains("claims", case=False, na=False)
+                    ]
+                else:
+                    filtered["initiative"] = df.head(6)
+
+            else:  # CIO
+                filtered["initiative"] = df
+
+        # -----------------------------
+        # COST FILTER
+        # -----------------------------
+        if cost_df is not None:
+            filtered["cost"] = cost_df
+
+        # -----------------------------
+        # RISK FILTER
+        # -----------------------------
+        if risk_df is not None:
+            filtered["risk"] = risk_df
+
+        # -----------------------------
+        # EPIC FILTER
+        # -----------------------------
+        if epic_df is not None:
+            filtered["epic"] = epic_df
+
+        return filtered
+
+    except Exception:
+        return {
+            "initiative": initiative_df,
+            "cost": cost_df,
+            "risk": risk_df,
+            "epic": epic_df
+        }
+# ---------------------------------------------------
 # INTENT CLASSIFIER
 # ---------------------------------------------------
 def classify_user_intent(question):
@@ -290,28 +352,28 @@ def determine_required_data(intent):
 def show_director_dashboard():
     st.subheader("Director Portfolio Dashboard")
 
-    if initiative_df is None:
+    if filtered_initiative_df is None:
         st.warning("Initiative dataset missing")
         return
 
     status_col = find_column(
         
-        initiative_df,
+        filtered_initiative_df,
         ["status", "state"]
     )
 
     completion_col = find_column(
-        initiative_df,
+        filtered_initiative_df,
         ["completion", "progress"]
     )
 
-    total_projects = len(initiative_df)
+    total_projects = len(filtered_initiative_df)
 
     delayed_projects = 0
     if status_col:
         delayed_projects = len(
-            initiative_df[
-                initiative_df[status_col]
+            filtered_initiative_df[
+                filtered_initiative_df[status_col]
                 .astype(str)
                 .str.lower()
                 .isin(["delayed"])
@@ -320,11 +382,11 @@ def show_director_dashboard():
 
     avg_completion = 0
     if completion_col:
-        avg_completion = initiative_df[
+        avg_completion = filtered_initiative_df[
             completion_col
         ].mean()
 
-    open_risks = len(risk_df) if risk_df is not None else 0
+    open_risks = len(filtered_risk_df) if filtered_risk_df is not None else 0
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -335,21 +397,21 @@ def show_director_dashboard():
 
     if status_col:
         fig = px.pie(
-            initiative_df,
+            filtered_initiative_df,
             names=status_col,
             title="Portfolio Status Distribution"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    if risk_df is not None:
-        impact_col = find_column(risk_df, ["impact"])
+    if filtered_risk_df is not None:
+        impact_col = find_column(filtered_risk_df, ["impact"])
         probability_col = find_column(
-            risk_df,
+            filtered_risk_df,
             ["probability", "likelihood"]
         )
 
         if impact_col and probability_col:
-            heatmap = risk_df.groupby(
+            heatmap = filtered_risk_df.groupby(
                 [impact_col, probability_col]
             ).size().reset_index(name="count")
 
@@ -372,43 +434,43 @@ def show_pm_dashboard():
     # -----------------------------
     # Dataset validation
     # -----------------------------
-    if epic_df is None:
+    if filtered_epic_df is None:
         st.warning("Epic dataset missing")
         return
 
     # Column detection
     epic_name_col = find_column(
-        epic_df,
+        filtered_epic_df,
         ["epic_name", "summary", "name"]
     )
 
     epic_status_col = find_column(
-        epic_df,
+        filtered_epic_df,
         ["status", "state"]
     )
 
     epic_id_col = find_column(
-        epic_df,
+        filtered_epic_df,
         ["epic_id", "id", "issue_key"]
     )
 
     cost_epic_col = None
     actual_cost_col = None
 
-    if cost_df is not None:
+    if filtered_cost_df is not None:
         cost_epic_col = find_column(
-            cost_df,
+            filtered_cost_df,
             ["epic_id", "initiative_id", "id"]
         )
 
         actual_cost_col = find_column(
-            cost_df,
+            filtered_cost_df,
             ["actual_cost"]
         )
     # -----------------------------
     # KPI Calculations
     # -----------------------------
-    total_epics = len(epic_df)
+    total_epics = len(filtered_epic_df)
 
     blocked_items = 0
     completed_items = 0
@@ -416,8 +478,8 @@ def show_pm_dashboard():
 
     if epic_status_col:
         blocked_items = len(
-            epic_df[
-                epic_df[epic_status_col]
+            filtered_epic_df[
+                filtered_epic_df[epic_status_col]
                 .astype(str)
                 .str.lower()
                 .isin(["blocked"])
@@ -425,8 +487,8 @@ def show_pm_dashboard():
         )
 
         completed_items = len(
-            epic_df[
-                epic_df[epic_status_col]
+            filtered_epic_df[
+                filtered_epic_df[epic_status_col]
                 .astype(str)
                 .str.lower()
                 .isin(["done", "completed"])
@@ -434,8 +496,8 @@ def show_pm_dashboard():
         )
 
         in_progress_items = len(
-            epic_df[
-                epic_df[epic_status_col]
+            filtered_epic_df[
+                filtered_epic_df[epic_status_col]
                 .astype(str)
                 .str.lower()
                 .isin(["in progress"])
@@ -444,12 +506,12 @@ def show_pm_dashboard():
 
     total_epic_cost = 0
 
-    if cost_df is not None and actual_cost_col:
+    if filtered_cost_df is not None and actual_cost_col:
         total_epic_cost = numeric_safe(
-            cost_df[actual_cost_col]
+            filtered_cost_df[actual_cost_col]
         ).sum()
 
-    open_risks = len(risk_df) if risk_df is not None else 0
+    open_risks = len(filtered_risk_df) if filtered_risk_df is not None else 0
 
     # -----------------------------
     # KPI Row
@@ -469,7 +531,7 @@ def show_pm_dashboard():
     # -----------------------------
     if epic_status_col:
         fig1 = px.pie(
-            epic_df,
+            filtered_epic_df,
             names=epic_status_col,
             title="Epic Status Distribution"
         )
@@ -482,19 +544,19 @@ def show_pm_dashboard():
     # -----------------------------
     # Risk Heat Map
     # -----------------------------
-    if risk_df is not None:
+    if filtered_risk_df is not None:
         impact_col = find_column(
-            risk_df,
+            filtered_risk_df,
             ["impact"]
         )
 
         probability_col = find_column(
-            risk_df,
+            filtered_risk_df,
             ["probability", "likelihood"]
         )
 
         if impact_col and probability_col:
-            heatmap_df = risk_df.groupby(
+            heatmap_df = filtered_risk_df.groupby(
                 [impact_col, probability_col]
             ).size().reset_index(name="count")
 
@@ -516,14 +578,14 @@ def show_pm_dashboard():
     # Epic-wise Cost Chart
     # -----------------------------
     if (
-        cost_df is not None
+        filtered_cost_df is not None
         and epic_id_col
         and cost_epic_col
         and actual_cost_col
     ):
         try:
-            epic_cost_df = epic_df.merge(
-                cost_df,
+            epic_cost_df = filtered_epic_df.merge(
+                filtered_cost_df,
                 left_on=epic_id_col,
                 right_on=cost_epic_col,
                 how="left"
@@ -555,7 +617,7 @@ def show_pm_dashboard():
     # -----------------------------
     st.subheader("Epic Data Table")
     st.dataframe(
-        epic_df.head(20),
+        filtered_epic_df.head(20),
         use_container_width=True
     )
 # ---------------------------------------------------
@@ -564,29 +626,29 @@ def show_pm_dashboard():
 def show_cio_dashboard():
     st.subheader("CIO Strategic Dashboard")
 
-    if initiative_df is None or cost_df is None:
+    if filtered_initiative_df is None or filtered_cost_df is None:
         st.warning("Required datasets missing")
         return
 
     # Column detection
-    completion_col = find_column(initiative_df, ["completion"])
-    planned_budget_col = find_column(cost_df, ["planned"])
-    actual_cost_col = find_column(cost_df, ["actual"])
-    planned_completion_col = find_column(cost_df, ["planned_completion"])
+    completion_col = find_column(filtered_initiative_df, ["completion"])
+    planned_budget_col = find_column(filtered_cost_df, ["planned"])
+    actual_cost_col = find_column(filtered_cost_df, ["actual"])
+    planned_completion_col = find_column(filtered_cost_df, ["planned_completion"])
 
     # KPI calculations
     portfolio_completion = (
-        initiative_df[completion_col].mean()
+        filtered_initiative_df[completion_col].mean()
         if completion_col else 0
     )
 
     planned_budget = (
-        numeric_safe(cost_df[planned_budget_col]).sum()
+        numeric_safe(filtered_cost_df[planned_budget_col]).sum()
         if planned_budget_col else 0
     )
 
     actual_cost = (
-        numeric_safe(cost_df[actual_cost_col]).sum()
+        numeric_safe(filtered_cost_df[actual_cost_col]).sum()
         if actual_cost_col else 0
     )
 
@@ -597,7 +659,7 @@ def show_cio_dashboard():
 
     spi = (
         portfolio_completion / 100 /
-        (cost_df[planned_completion_col].mean() / 100)
+        (filtered_cost_df[planned_completion_col].mean() / 100)
         if planned_completion_col else 0
     )
 
@@ -606,7 +668,7 @@ def show_cio_dashboard():
         if actual_cost > 0 else 0
     )
 
-    open_risks = len(risk_df) if risk_df is not None else 0
+    open_risks = len(filtered_risk_df) if filtered_risk_df is not None else 0
 
     confidence = (
         "Low" if spi < 0.8
@@ -629,12 +691,12 @@ def show_cio_dashboard():
     c8.metric("Delivery Confidence", confidence)
 
     # Risk Heatmap
-    if risk_df is not None:
-        impact_col = find_column(risk_df, ["impact"])
-        probability_col = find_column(risk_df, ["probability", "likelihood"])
+    if filtered_risk_df is not None:
+        impact_col = find_column(filtered_risk_df, ["impact"])
+        probability_col = find_column(filtered_risk_df, ["probability", "likelihood"])
 
         if impact_col and probability_col:
-            heatmap = risk_df.groupby(
+            heatmap = filtered_risk_df.groupby(
                 [impact_col, probability_col]
             ).size().reset_index(name="count")
 
@@ -649,10 +711,10 @@ def show_cio_dashboard():
             st.plotly_chart(fig, use_container_width=True)
 
     # Budget Chart
-    initiative_name_col = find_column(cost_df, ["initiative", "name"])
+    initiative_name_col = find_column(filtered_cost_df, ["initiative", "name"])
 
     if initiative_name_col and planned_budget_col and actual_cost_col:
-        budget_df = cost_df.groupby(
+        budget_df = filtered_cost_df.groupby(
             initiative_name_col
         )[[planned_budget_col, actual_cost_col]].sum().reset_index()
 
@@ -668,212 +730,115 @@ def show_cio_dashboard():
     # Completion Chart
     if completion_col:
         fig = px.bar(
-            initiative_df,
-            x=initiative_name_col if initiative_name_col else initiative_df.index,
+            filtered_initiative_df,
+            x=initiative_name_col if initiative_name_col else filtered_initiative_df.index,
             y=completion_col,
             title="Completion % by Initiative"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Table
     st.subheader("Initiative Details")
-    st.dataframe(initiative_df.head(10))
+    st.dataframe(filtered_initiative_df.head(10))
 # ---------------------------------------------------
-# CHATBOT ENGINE
-# ---------------------------------------------------
-# ---------------------------------------------------
-# CHATBOT ENGINE
+# CHATBOT ENGINE (FINAL CLEAN VERSION)
 # ---------------------------------------------------
 def run_agent(question, persona):
     try:
-        if initiative_df is None:
+        if filtered_initiative_df is None:
             return "No initiative dataset found."
 
-        intent = classify_user_intent(question)
+        # -----------------------------
+        # PREPARE DATA FOR LLM
+        # -----------------------------
+        data_context = ""
 
-        initiative_id_col = find_column(
-            initiative_df,
-            ["initiative_id", "issue_key", "id"]
-        )
+        try:
+            # Keep it small (top 20 rows only)
+            sample_data = filtered_initiative_df.head(20)
 
-        initiative_name_col = find_column(
-            initiative_df,
-            ["initiative_name", "summary", "name"]
-        )
+            data_context = sample_data.to_string(index=False)
 
-        planned_budget_col = find_column(
-            cost_df,
-            ["planned_budget", "planned"]
-        )
+        except Exception:
+            data_context = "No structured data available."
 
-        actual_cost_col = find_column(
-            cost_df,
-            ["actual_cost", "actual"]
-        )
+        # -----------------------------
+        # OPTIONAL: Add cost + risk
+        # -----------------------------
+        cost_context = ""
+        risk_context = ""
 
-        risk_link_col = find_column(
-            risk_df,
-            ["linked_id", "initiative_id"]
-        )
+        if filtered_cost_df is not None:
+            cost_context = filtered_cost_df.head(10).to_string(index=False)
 
-        master_df = initiative_df.copy()
+        if filtered_risk_df is not None:
+            risk_context = filtered_risk_df.head(10).to_string(index=False)
 
-        # Merge cost data
-        if (
-            cost_df is not None
-            and initiative_id_col
-            and initiative_id_col in cost_df.columns
-        ):
-            master_df = master_df.merge(
-                cost_df,
-                on=initiative_id_col,
-                how="left"
-            )
-
-        # Merge risk data
-        if (
-            risk_df is not None
-            and risk_link_col
-            and initiative_id_col
-        ):
-            master_df = master_df.merge(
-                risk_df,
-                left_on=initiative_id_col,
-                right_on=risk_link_col,
-                how="left"
-            )
-
-        status_col = find_column(
-            master_df,
-            ["status", "state"]
-        )
-
-        risk_impact_col = find_column(
-            master_df,
-            ["impact"]
-        )
-
-        # Risk projects
-        high_risk_projects = pd.DataFrame()
-
-        if risk_impact_col:
-            high_risk_projects = master_df[
-                master_df[risk_impact_col]
-                .astype(str)
-                .str.lower()
-                .str.contains(
-                    "high|critical|severe|red|p1",
-                    na=False
-                )
-            ]
-
-        # Delayed projects
-        delayed_projects = pd.DataFrame()
-
-        if status_col:
-            delayed_projects = master_df[
-                master_df[status_col]
-                .astype(str)
-                .str.lower()
-                .isin(["delayed"])
-            ]
-
-        # Over budget projects
-        over_budget_projects = pd.DataFrame()
-
-        if planned_budget_col and actual_cost_col:
-            over_budget_projects = master_df[
-                numeric_safe(master_df[actual_cost_col]) >
-                numeric_safe(master_df[planned_budget_col])
-            ]
-
-        # Intent routing
-        if intent == "risk":
-            analysis_df = high_risk_projects
-
-        elif intent == "cost":
-            analysis_df = over_budget_projects
-
-        elif intent == "schedule":
-            analysis_df = delayed_projects
-
-        else:
-            analysis_df = master_df
-
-        if analysis_df.empty:
-            analysis_df = master_df.head(5)
-
-        summary_cols = []
-
-        for col in [
-            initiative_name_col,
-            status_col,
-            planned_budget_col,
-            actual_cost_col,
-            risk_impact_col
-        ]:
-            if col and col in analysis_df.columns:
-                summary_cols.append(col)
-
-        if summary_cols:
-            final_summary = analysis_df[
-                summary_cols
-            ].head(5)
-        else:
-            final_summary = analysis_df.head(5)
-
-        # RAG retrieval
-        raci_context = ""
+        # -----------------------------
+        # RAG CONTEXT (your documents)
+        # -----------------------------
+        rag_context = ""
 
         if retriever:
             try:
                 docs = retriever.invoke(question)
-
-                raci_context = "\n".join([
-                    doc.page_content
-                    for doc in docs[:3]
-                ])
-
-            except Exception:
+                rag_context = "\n".join([d.page_content for d in docs[:3]])
+            except:
                 pass
 
-        persona_guidance = {
-            "Project Manager":
-                "Focus on blockers, execution recovery and sprint delivery.",
-
-            "Director":
-                "Focus on portfolio risks, escalations and dependencies.",
-
-            "CIO":
-                "Focus on strategy, financial exposure and executive decisions."
+        # -----------------------------
+        # PERSONA STYLE
+        # -----------------------------
+        persona_style = {
+            "Project Manager": "Focus on execution, blockers, and delivery.",
+            "Director": "Focus on risks, dependencies, and escalations.",
+            "CIO": "Focus on strategy, financial impact, and decisions."
         }
 
+        # -----------------------------
+        # 🔥 FULL LLM CONTROL PROMPT
+        # -----------------------------
         prompt = f"""
 You are an intelligent PMO AI Assistant.
 
-Question:
+User Question:
 {question}
 
-Persona:
+User Persona:
 {persona}
 
-Intent:
-{intent}
-
 Communication Style:
-{persona_guidance.get(persona)}
+{persona_style.get(persona)}
 
-Analyzed Data:
-{final_summary.to_string()}
+Available Data:
+Initiatives:
+{data_context}
 
-RAG Context:
-{raci_context}
+Cost Data:
+{cost_context}
+
+Risk Data:
+{risk_context}
+
+RACI / Documents:
+{rag_context}
 
 Instructions:
-- Analyze cross dataset relationships
-- Provide business summary
-- Recommend actions
-- Avoid repetitive responses
+- Understand the question deeply (DO NOT rely on keywords only)
+- Identify if the user is asking about:
+    - specific project
+    - portfolio
+    - cost
+    - risk
+    - schedule
+- If a project name is mentioned → ONLY answer for that project
+- If no project is mentioned → give top relevant insights
+- Always use actual project/initiative names from the data
+- NEVER say "Project A" or "Project B"
+- Provide:
+    1. Direct Answer
+    2. Key Insights
+    3. Recommended Actions
+- Keep response clear and professional
 """
 
         response = agent_llm.invoke(prompt)
@@ -881,7 +846,7 @@ Instructions:
         return response.content
 
     except Exception as e:
-        return f"AI analysis failed: {str(e)}"
+        return f"AI analysis failed: {str(e)}"   
 # ---------------------------------------------------
 # PROACTIVE ALERT ENGINE
 # ---------------------------------------------------
@@ -892,24 +857,24 @@ def generate_persona_alerts(persona):
         # -----------------------------
         # Cost Alerts
         # -----------------------------
-        if cost_df is not None:
+        if filtered_cost_df is not None:
             planned_col = find_column(
-                cost_df,
+                filtered_cost_df,
                 ["planned_budget", "planned"]
             )
 
             actual_col = find_column(
-                cost_df,
+                filtered_cost_df,
                 ["actual_cost", "actual"]
             )
 
             if planned_col and actual_col:
-                planned_total = numeric_safe(
-                    cost_df[planned_col]
+                planned_total =(
+                    numeric_safe(filtered_cost_df.get(planned_col))
                 ).sum()
 
                 actual_total = numeric_safe(
-                    cost_df[actual_col]
+                    filtered_cost_df[actual_col]
                 ).sum()
 
                 if actual_total > planned_total:
@@ -925,16 +890,16 @@ def generate_persona_alerts(persona):
         # -----------------------------
         # Delay Alerts
         # -----------------------------
-        if initiative_df is not None:
+        if filtered_initiative_df is not None:
             status_col = find_column(
-                initiative_df,
+                filtered_initiative_df,
                 ["status"]
             )
 
             if status_col:
                 delayed_count = len(
-                    initiative_df[
-                        initiative_df[status_col]
+                    filtered_initiative_df[
+                        filtered_initiative_df[status_col]
                         .astype(str)
                         .str.lower()
                         .isin(["delayed"])
@@ -949,16 +914,16 @@ def generate_persona_alerts(persona):
         # -----------------------------
         # Risk Alerts
         # -----------------------------
-        if risk_df is not None:
+        if filtered_risk_df is not None:
             impact_col = find_column(
-                risk_df,
+                filtered_risk_df,
                 ["impact"]
             )
 
             if impact_col:
                 high_risk_count = len(
-                    risk_df[
-                        risk_df[impact_col]
+                    filtered_risk_df[
+                        filtered_risk_df[impact_col]
                         .astype(str)
                         .str.lower()
                         .str.contains(
@@ -1018,7 +983,6 @@ user_email = "divya@company.com"
 
 # Default role (from login system in real world)
 default_role = "Director"
-
 # Demo mode toggle
 demo_mode = st.sidebar.checkbox("Enable Demo Role Switch", value=True)
 
@@ -1036,7 +1000,13 @@ st.markdown(f"""
 ### 👤 Logged in as: {user_email}  
 **Role:** {persona}
 """)
+# Apply role-based filtering
+filtered_data = apply_role_filter(persona)
 
+filtered_initiative_df = filtered_data.get("initiative")
+filtered_cost_df = filtered_data.get("cost")
+filtered_risk_df = filtered_data.get("risk")
+filtered_epic_df = filtered_data.get("epic")
 tab1, tab2 = st.tabs([
     "📊 Dashboard",
     "💬 Chat Assistant"
@@ -1052,7 +1022,6 @@ with tab1:
 
     elif persona == "CIO":
         show_cio_dashboard()
-
 with tab2:
     st.subheader("Alert Automation")
 
