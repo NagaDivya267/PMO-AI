@@ -6,6 +6,7 @@ import plotly.express as px
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 
 # ---------------------------------------------------
@@ -241,10 +242,22 @@ def find_column(df, possible_cols):
 # ---------------------------------------------------
 # INTENT CLASSIFIER
 # ---------------------------------------------------
-def classify_user_intent(question):
-    prompt = f"""
-    Classify this PMO question into ONE category:
+def classify_user_intent(question, chat_history=None):
+    history_block = ""
+    if chat_history:
+        recent = chat_history[-6:]
+        lines = []
+        for msg in recent:
+            lines.append(f"User: {msg['user']}")
+            lines.append(f"Assistant: {msg['assistant'][:200]}")
+        history_block = "\n".join(lines)
 
+    prompt = f"""
+    Classify this PMO question into ONE category.
+    Use the conversation history to resolve pronouns and references
+    (e.g. "these", "that project", "tell me more").
+
+    Categories:
     - cost
     - risk
     - schedule
@@ -252,7 +265,10 @@ def classify_user_intent(question):
     - portfolio
     - delivery
 
-    Question:
+    Conversation history:
+    {history_block}
+
+    Current question:
     {question}
 
     Return only category name.
@@ -684,199 +700,196 @@ def show_cio_dashboard():
 # ---------------------------------------------------
 # CHATBOT ENGINE
 # ---------------------------------------------------
-def run_agent(question, persona):
+def build_data_context(intent):
+    """Build relevant data context based on classified intent."""
+    if initiative_df is None:
+        return "No initiative dataset found."
+
+    initiative_id_col = find_column(
+        initiative_df,
+        ["initiative_id", "issue_key", "id"]
+    )
+
+    initiative_name_col = find_column(
+        initiative_df,
+        ["initiative_name", "summary", "name"]
+    )
+
+    planned_budget_col = find_column(
+        cost_df,
+        ["planned_budget", "planned"]
+    )
+
+    actual_cost_col = find_column(
+        cost_df,
+        ["actual_cost", "actual"]
+    )
+
+    risk_link_col = find_column(
+        risk_df,
+        ["linked_id", "initiative_id"]
+    )
+
+    master_df = initiative_df.copy()
+
+    if (
+        cost_df is not None
+        and initiative_id_col
+        and initiative_id_col in cost_df.columns
+    ):
+        master_df = master_df.merge(
+            cost_df,
+            on=initiative_id_col,
+            how="left"
+        )
+
+    if (
+        risk_df is not None
+        and risk_link_col
+        and initiative_id_col
+    ):
+        master_df = master_df.merge(
+            risk_df,
+            left_on=initiative_id_col,
+            right_on=risk_link_col,
+            how="left"
+        )
+
+    status_col = find_column(master_df, ["status", "state"])
+    risk_impact_col = find_column(master_df, ["impact"])
+
+    high_risk_projects = pd.DataFrame()
+    if risk_impact_col and risk_impact_col in master_df.columns:
+        high_risk_projects = master_df[
+            master_df[risk_impact_col]
+            .astype(str)
+            .str.lower()
+            .str.contains(
+                "high|critical|severe|red|p1",
+                na=False
+            )
+        ]
+
+    delayed_projects = pd.DataFrame()
+    if status_col and status_col in master_df.columns:
+        delayed_projects = master_df[
+            master_df[status_col]
+            .astype(str)
+            .str.lower()
+            .isin(["delayed"])
+        ]
+
+    over_budget_projects = pd.DataFrame()
+    if (
+        planned_budget_col
+        and actual_cost_col
+        and planned_budget_col in master_df.columns
+        and actual_cost_col in master_df.columns
+    ):
+        over_budget_projects = master_df[
+            numeric_safe(master_df[actual_cost_col]) >
+            numeric_safe(master_df[planned_budget_col])
+        ]
+
+    if intent == "risk":
+        analysis_df = high_risk_projects
+    elif intent == "cost":
+        analysis_df = over_budget_projects
+    elif intent == "schedule":
+        analysis_df = delayed_projects
+    else:
+        analysis_df = master_df
+
+    if analysis_df.empty:
+        analysis_df = master_df.head(5)
+
+    summary_cols = []
+    for col in [
+        initiative_name_col,
+        status_col,
+        planned_budget_col,
+        actual_cost_col,
+        risk_impact_col
+    ]:
+        if col and col in analysis_df.columns:
+            summary_cols.append(col)
+
+    if summary_cols:
+        final_summary = analysis_df[summary_cols].head(10)
+    else:
+        final_summary = analysis_df.head(10)
+
+    return final_summary.to_string()
+
+
+PERSONA_GUIDANCE = {
+    "Project Manager":
+        "Focus on blockers, execution recovery and sprint delivery.",
+    "Director":
+        "Focus on portfolio risks, escalations and dependencies.",
+    "CIO":
+        "Focus on strategy, financial exposure and executive decisions."
+}
+
+
+def build_system_prompt(persona):
+    """Build a persistent system prompt that defines agent behavior."""
+    return f"""You are an intelligent, conversational PMO AI Assistant for an enterprise portfolio.
+
+Persona: {persona}
+Communication Style: {PERSONA_GUIDANCE.get(persona, "")}
+
+Core rules:
+- You have full memory of the conversation. Use prior messages to resolve
+  references like "these projects", "that initiative", "tell me more", etc.
+- When the user asks a follow-up, do NOT repeat information already given.
+  Build on the previous answer instead.
+- Analyze cross-dataset relationships (initiatives, costs, risks, epics).
+- Provide concise business summaries and recommend actionable next steps.
+- Use markdown formatting for readability (headers, bullets, bold).
+"""
+
+
+def run_agent(question, persona, chat_history=None):
     try:
         if initiative_df is None:
             return "No initiative dataset found."
 
-        intent = classify_user_intent(question)
+        intent = classify_user_intent(question, chat_history)
 
-        initiative_id_col = find_column(
-            initiative_df,
-            ["initiative_id", "issue_key", "id"]
-        )
+        data_context = build_data_context(intent)
 
-        initiative_name_col = find_column(
-            initiative_df,
-            ["initiative_name", "summary", "name"]
-        )
-
-        planned_budget_col = find_column(
-            cost_df,
-            ["planned_budget", "planned"]
-        )
-
-        actual_cost_col = find_column(
-            cost_df,
-            ["actual_cost", "actual"]
-        )
-
-        risk_link_col = find_column(
-            risk_df,
-            ["linked_id", "initiative_id"]
-        )
-
-        master_df = initiative_df.copy()
-
-        # Merge cost data
-        if (
-            cost_df is not None
-            and initiative_id_col
-            and initiative_id_col in cost_df.columns
-        ):
-            master_df = master_df.merge(
-                cost_df,
-                on=initiative_id_col,
-                how="left"
-            )
-
-        # Merge risk data
-        if (
-            risk_df is not None
-            and risk_link_col
-            and initiative_id_col
-        ):
-            master_df = master_df.merge(
-                risk_df,
-                left_on=initiative_id_col,
-                right_on=risk_link_col,
-                how="left"
-            )
-
-        status_col = find_column(
-            master_df,
-            ["status", "state"]
-        )
-
-        risk_impact_col = find_column(
-            master_df,
-            ["impact"]
-        )
-
-        # Risk projects
-        high_risk_projects = pd.DataFrame()
-
-        if risk_impact_col:
-            high_risk_projects = master_df[
-                master_df[risk_impact_col]
-                .astype(str)
-                .str.lower()
-                .str.contains(
-                    "high|critical|severe|red|p1",
-                    na=False
-                )
-            ]
-
-        # Delayed projects
-        delayed_projects = pd.DataFrame()
-
-        if status_col:
-            delayed_projects = master_df[
-                master_df[status_col]
-                .astype(str)
-                .str.lower()
-                .isin(["delayed"])
-            ]
-
-        # Over budget projects
-        over_budget_projects = pd.DataFrame()
-
-        if planned_budget_col and actual_cost_col:
-            over_budget_projects = master_df[
-                numeric_safe(master_df[actual_cost_col]) >
-                numeric_safe(master_df[planned_budget_col])
-            ]
-
-        # Intent routing
-        if intent == "risk":
-            analysis_df = high_risk_projects
-
-        elif intent == "cost":
-            analysis_df = over_budget_projects
-
-        elif intent == "schedule":
-            analysis_df = delayed_projects
-
-        else:
-            analysis_df = master_df
-
-        if analysis_df.empty:
-            analysis_df = master_df.head(5)
-
-        summary_cols = []
-
-        for col in [
-            initiative_name_col,
-            status_col,
-            planned_budget_col,
-            actual_cost_col,
-            risk_impact_col
-        ]:
-            if col and col in analysis_df.columns:
-                summary_cols.append(col)
-
-        if summary_cols:
-            final_summary = analysis_df[
-                summary_cols
-            ].head(5)
-        else:
-            final_summary = analysis_df.head(5)
-
-        # RAG retrieval
         raci_context = ""
-
         if retriever:
             try:
-                docs = retriever.invoke(question)
-
+                rag_docs = retriever.invoke(question)
                 raci_context = "\n".join([
                     doc.page_content
-                    for doc in docs[:3]
+                    for doc in rag_docs[:3]
                 ])
-
             except Exception:
                 pass
 
-        persona_guidance = {
-            "Project Manager":
-                "Focus on blockers, execution recovery and sprint delivery.",
+        messages = [
+            SystemMessage(content=build_system_prompt(persona))
+        ]
 
-            "Director":
-                "Focus on portfolio risks, escalations and dependencies.",
+        if chat_history:
+            for msg in chat_history:
+                messages.append(HumanMessage(content=msg["user"]))
+                messages.append(AIMessage(content=msg["assistant"]))
 
-            "CIO":
-                "Focus on strategy, financial exposure and executive decisions."
-        }
+        user_content = f"""{question}
 
-        prompt = f"""
-You are an intelligent PMO AI Assistant.
+--- Data Context (intent: {intent}) ---
+{data_context}
 
-Question:
-{question}
-
-Persona:
-{persona}
-
-Intent:
-{intent}
-
-Communication Style:
-{persona_guidance.get(persona)}
-
-Analyzed Data:
-{final_summary.to_string()}
-
-RAG Context:
-{raci_context}
-
-Instructions:
-- Analyze cross dataset relationships
-- Provide business summary
-- Recommend actions
-- Avoid repetitive responses
+--- RAG / RACI Context ---
+{raci_context if raci_context else "No RACI document context available."}
 """
+        messages.append(HumanMessage(content=user_content))
 
-        response = agent_llm.invoke(prompt)
+        response = agent_llm.invoke(messages)
 
         return response.content
 
@@ -1104,9 +1117,15 @@ with tab2:
     # -----------------------------
     st.subheader("PMO Chat Assistant")
 
-    # Initialize session
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    chat_header_col1, chat_header_col2 = st.columns([4, 1])
+    with chat_header_col1:
+        st.caption(
+            "Fully conversational — ask follow-ups and I'll remember context."
+        )
+    with chat_header_col2:
+        if st.button("🗑️ Clear Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
 
     # Display chat history
     for chat in st.session_state.chat_history:
@@ -1124,7 +1143,11 @@ with tab2:
             st.write(question)
 
         with st.spinner("Analyzing portfolio..."):
-            answer = run_agent(question, persona)
+            answer = run_agent(
+                question,
+                persona,
+                chat_history=st.session_state.chat_history
+            )
 
         with st.chat_message("assistant"):
             st.write(answer)
